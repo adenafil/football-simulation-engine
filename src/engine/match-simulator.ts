@@ -4,7 +4,9 @@ import type { Manager } from "../domain/manager";
 import type { Tactic } from "../domain/tactic";
 import type {
   InjuryEvent,
+  InjuryAvailabilityConsequence,
   MatchContext,
+  MatchAvailabilityConsequences,
   MatchResult,
   MatchStats,
   PlayerMatchStats,
@@ -12,11 +14,13 @@ import type {
   PossessionEvent,
   PossessionParticipants,
   SubstitutionEvent,
+  SuspensionConsequence,
 } from "../domain/match-context";
 import type { RoleDefinition } from "./role-weights";
 import { computeTeamPhaseScores, computeGoalkeeperPhaseScores, computeMatchPlayerRating, type PhaseScores } from "./ratings";
 import { simulatePossession, getPossessionShare } from "./possession-engine";
 import { getStaminaDrainMultiplier } from "./tactic-modifiers";
+import { defaultCompetitionRules, type CompetitionRules } from "./competition-rules";
 import {
   getScorelineState,
   getTimePhase,
@@ -45,6 +49,7 @@ export interface TeamSetup {
   outfield: LineupPlayer[];
   goalkeeper: LineupPlayer;
   bench: LineupPlayer[];
+  competitionRules?: CompetitionRules;
 }
 
 interface ActivePlayerState {
@@ -343,8 +348,9 @@ function applyForcedInjurySubstitution(
   minute: number,
   scoreDiff: number,
   team: "home" | "away",
+  rules: CompetitionRules,
 ): { subEvent: SubstitutionEvent; replacementName: string; replacementId: string } | null {
-  if (state.substitutionsUsed >= 5) return null;
+  if (state.substitutionsUsed >= rules.match.maxSubstitutions) return null;
 
   const replacement = pickBenchReplacement(state, playerOut, scoreDiff);
   if (!replacement) return null;
@@ -357,6 +363,59 @@ function applyForcedInjurySubstitution(
     subEvent,
     replacementName: replacement.lineup.player.name,
     replacementId: replacement.lineup.player.id,
+  };
+}
+
+function getInjuryAvailability(severity: "minor" | "moderate" | "severe"): Omit<InjuryAvailabilityConsequence, "playerId" | "playerName" | "team" | "severity"> {
+  if (severity === "minor") {
+    return { expectedMatchesOut: 0, status: "available" };
+  }
+
+  if (severity === "moderate") {
+    return { expectedMatchesOut: 2, status: "doubtful" };
+  }
+
+  return { expectedMatchesOut: 5, status: "unavailable" };
+}
+
+function buildAvailabilityConsequences(
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  injuries: InjuryEvent[],
+): MatchAvailabilityConsequences {
+  const suspensions: SuspensionConsequence[] = [];
+  const injuryConsequences: InjuryAvailabilityConsequence[] = [];
+
+  for (const stats of playerStats.values()) {
+    if (stats.redCards > 0) {
+      suspensions.push({
+        playerId: stats.playerId,
+        playerName: stats.name,
+        team: stats.team,
+        reason: "red-card",
+        matches: 1,
+      });
+    }
+  }
+
+  for (const injury of injuries) {
+    const availability = getInjuryAvailability(injury.severity);
+    if (availability.expectedMatchesOut === 0 && availability.status === "available") {
+      continue;
+    }
+
+    injuryConsequences.push({
+      playerId: injury.playerId,
+      playerName: injury.playerName,
+      team: injury.team,
+      severity: injury.severity,
+      expectedMatchesOut: availability.expectedMatchesOut,
+      status: availability.status,
+    });
+  }
+
+  return {
+    suspensions,
+    injuries: injuryConsequences,
   };
 }
 
@@ -461,14 +520,14 @@ function pickBenchReplacement(
   return scored[0]!.bench;
 }
 
-function shouldAttemptSubstitution(state: TeamMatchState, minute: number): boolean {
-  if (state.substitutionsUsed >= 5) return false;
+function shouldAttemptSubstitution(state: TeamMatchState, minute: number, rules: CompetitionRules): boolean {
+  if (state.substitutionsUsed >= rules.match.maxSubstitutions) return false;
   if (minute < 50) return false;
 
   if (minute >= 50 && minute < 60) return state.substitutionsUsed < 1;
   if (minute >= 60 && minute < 70) return state.substitutionsUsed < 3;
   if (minute >= 70 && minute < 80) return state.substitutionsUsed < 4;
-  if (minute >= 80) return state.substitutionsUsed < 5;
+  if (minute >= 80) return state.substitutionsUsed < rules.match.maxSubstitutions;
 
   return true;
 }
@@ -524,6 +583,7 @@ function getScoreDiff(homeScore: number, awayScore: number, isHome: boolean): nu
 }
 
 export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchContext): MatchResult {
+  const rules = home.competitionRules ?? away.competitionRules ?? defaultCompetitionRules;
   const homeState = createTeamMatchState(home);
   const awayState = createTeamMatchState(away);
   const playerStats = initializePlayerStats(home, away);
@@ -713,14 +773,15 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
       let replacementPlayerName: string | undefined;
 
       if (severity !== "minor") {
-        const forcedSub = applyForcedInjurySubstitution(
-          injuryCase.state,
-          playerStats,
-          injuredPlayer,
-          minute,
-          injuryCase.scoreDiff,
-          injuryCase.team,
-        );
+          const forcedSub = applyForcedInjurySubstitution(
+            injuryCase.state,
+            playerStats,
+            injuredPlayer,
+            minute,
+            injuryCase.scoreDiff,
+            injuryCase.team,
+            rules,
+          );
 
         if (forcedSub) {
           forcedSubstitution = true;
@@ -762,7 +823,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
       const homeScoreDiff = homeScore - awayScore;
       const awayScoreDiff = awayScore - homeScore;
 
-      if (shouldAttemptSubstitution(homeState, minute)) {
+      if (shouldAttemptSubstitution(homeState, minute, rules)) {
         const playerOut = pickPlayerToSubOut(homeState, minute, homeScoreDiff);
         if (playerOut) {
           const replacement = pickBenchReplacement(homeState, playerOut, homeScoreDiff);
@@ -781,7 +842,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
         }
       }
 
-      if (shouldAttemptSubstitution(awayState, minute)) {
+      if (shouldAttemptSubstitution(awayState, minute, rules)) {
         const playerOut = pickPlayerToSubOut(awayState, minute, awayScoreDiff);
         if (playerOut) {
           const replacement = pickBenchReplacement(awayState, playerOut, awayScoreDiff);
@@ -835,6 +896,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     });
 
   const manOfMatch = [...playerRatings].sort((a, b) => b.rating - a.rating)[0]?.name ?? "Unknown";
+  const availability = buildAvailabilityConsequences(playerStats, allInjuries);
 
   return {
     homeTeamId: home.club.id,
@@ -852,5 +914,6 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     awayFormation: away.tactic.formation,
     substitutions: allSubstitutions,
     injuries: allInjuries,
+    availability,
   };
 }

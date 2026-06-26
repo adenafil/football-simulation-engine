@@ -186,3 +186,27 @@ test("injury events are additive and well-formed", () => {
     expect(injury.playerName.length).toBeGreaterThan(0);
   }
 });
+
+test("availability suspensions align with red cards", () => {
+  const results = Array.from({ length: 10 }, () => runSimulation());
+  for (const result of results) {
+    const redCardedPlayers = result.playerMatchStats.filter(player => player.redCards > 0);
+    for (const player of redCardedPlayers) {
+      const suspension = result.availability.suspensions.find(entry => entry.playerId === player.playerId);
+      expect(suspension).toBeDefined();
+      expect(suspension?.matches).toBeGreaterThanOrEqual(1);
+    }
+  }
+});
+
+test("availability injury consequences align with injury severities", () => {
+  const results = Array.from({ length: 10 }, () => runSimulation());
+  for (const result of results) {
+    for (const injury of result.injuries) {
+      if (injury.severity === "minor") continue;
+      const consequence = result.availability.injuries.find(entry => entry.playerId === injury.playerId);
+      expect(consequence).toBeDefined();
+      expect(consequence?.expectedMatchesOut).toBeGreaterThan(0);
+    }
+  }
+});

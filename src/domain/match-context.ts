@@ -98,6 +98,28 @@ export interface MatchStats {
   xG: { home: number; away: number };
 }
 
+export interface SuspensionConsequence {
+  playerId: string;
+  playerName: string;
+  team: "home" | "away";
+  reason: "red-card";
+  matches: number;
+}
+
+export interface InjuryAvailabilityConsequence {
+  playerId: string;
+  playerName: string;
+  team: "home" | "away";
+  severity: "minor" | "moderate" | "severe";
+  expectedMatchesOut: number;
+  status: "available" | "doubtful" | "unavailable";
+}
+
+export interface MatchAvailabilityConsequences {
+  suspensions: SuspensionConsequence[];
+  injuries: InjuryAvailabilityConsequence[];
+}
+
 export interface MatchResult {
   homeTeamId: string;
   awayTeamId: string;
@@ -114,4 +136,5 @@ export interface MatchResult {
   awayFormation: string;
   substitutions: SubstitutionEvent[];
   injuries: InjuryEvent[];
+  availability: MatchAvailabilityConsequences;
 }
