@@ -384,6 +384,7 @@ function buildAvailabilityConsequences(
 ): MatchAvailabilityConsequences {
   const suspensions: SuspensionConsequence[] = [];
   const injuryConsequences: InjuryAvailabilityConsequence[] = [];
+  const yellowCards: { playerId: string; playerName: string; team: "home" | "away" }[] = [];
 
   for (const stats of playerStats.values()) {
     if (stats.redCards > 0) {
@@ -394,6 +395,15 @@ function buildAvailabilityConsequences(
         reason: "red-card",
         matches: 1,
       });
+    }
+    if (stats.yellowCards > 0) {
+      for (let i = 0; i < stats.yellowCards; i++) {
+        yellowCards.push({
+          playerId: stats.playerId,
+          playerName: stats.name,
+          team: stats.team,
+        });
+      }
     }
   }
 
@@ -416,6 +426,7 @@ function buildAvailabilityConsequences(
   return {
     suspensions,
     injuries: injuryConsequences,
+    yellowCards,
   };
 }
 
@@ -520,14 +531,27 @@ function pickBenchReplacement(
   return scored[0]!.bench;
 }
 
-function shouldAttemptSubstitution(state: TeamMatchState, minute: number, rules: CompetitionRules): boolean {
-  if (state.substitutionsUsed >= rules.match.maxSubstitutions) return false;
+function shouldAttemptSubstitution(
+  state: TeamMatchState,
+  minute: number,
+  rules: CompetitionRules,
+  isExtraTime: boolean,
+): boolean {
+  const maxSubs = isExtraTime
+    ? rules.match.maxSubstitutions + rules.knockout.extraTimeSubsAllowed
+    : rules.match.maxSubstitutions;
+
+  if (state.substitutionsUsed >= maxSubs) return false;
   if (minute < 50) return false;
+
+  if (isExtraTime && minute > 90) {
+    return true;
+  }
 
   if (minute >= 50 && minute < 60) return state.substitutionsUsed < 1;
   if (minute >= 60 && minute < 70) return state.substitutionsUsed < 3;
   if (minute >= 70 && minute < 80) return state.substitutionsUsed < 4;
-  if (minute >= 80) return state.substitutionsUsed < rules.match.maxSubstitutions;
+  if (minute >= 80) return state.substitutionsUsed < maxSubs;
 
   return true;
 }
@@ -582,7 +606,16 @@ function getScoreDiff(homeScore: number, awayScore: number, isHome: boolean): nu
   return isHome ? homeScore - awayScore : awayScore - homeScore;
 }
 
-export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchContext): MatchResult {
+export interface SimulateMatchOptions {
+  extraTime?: boolean;
+}
+
+export function simulateMatch(
+  home: TeamSetup,
+  away: TeamSetup,
+  context: MatchContext,
+  options?: SimulateMatchOptions,
+): MatchResult {
   const rules = home.competitionRules ?? away.competitionRules ?? defaultCompetitionRules;
   const homeState = createTeamMatchState(home);
   const awayState = createTeamMatchState(away);
@@ -616,8 +649,10 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
   let homePosCount = 0;
   let awayPosCount = 0;
 
-  const totalMinutes = 90 + Math.floor(Math.random() * 5);
-  const subCheckMinutes = [50, 55, 60, 65, 70, 75, 80, 83];
+  const totalMinutes = options?.extraTime ? 120 + Math.floor(Math.random() * 5) : 90 + Math.floor(Math.random() * 5);
+  const subCheckMinutes = options?.extraTime
+    ? [50, 55, 60, 65, 70, 75, 80, 83, 95, 100, 105, 110]
+    : [50, 55, 60, 65, 70, 75, 80, 83];
 
   const momentum = createMomentumState();
 
@@ -822,8 +857,9 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     if (subCheckMinutes.includes(minute)) {
       const homeScoreDiff = homeScore - awayScore;
       const awayScoreDiff = awayScore - homeScore;
+      const isExtraTime = options?.extraTime ?? false;
 
-      if (shouldAttemptSubstitution(homeState, minute, rules)) {
+      if (shouldAttemptSubstitution(homeState, minute, rules, isExtraTime)) {
         const playerOut = pickPlayerToSubOut(homeState, minute, homeScoreDiff);
         if (playerOut) {
           const replacement = pickBenchReplacement(homeState, playerOut, homeScoreDiff);
@@ -842,7 +878,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
         }
       }
 
-      if (shouldAttemptSubstitution(awayState, minute, rules)) {
+      if (shouldAttemptSubstitution(awayState, minute, rules, isExtraTime)) {
         const playerOut = pickPlayerToSubOut(awayState, minute, awayScoreDiff);
         if (playerOut) {
           const replacement = pickBenchReplacement(awayState, playerOut, awayScoreDiff);

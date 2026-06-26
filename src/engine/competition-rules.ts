@@ -6,8 +6,15 @@ export interface CompetitionPointsRules {
   loss: number;
 }
 
+export interface YellowCardAccumulationThreshold {
+  yellowCards: number;
+  suspendMatches: number;
+}
+
 export interface CompetitionSuspensionRules {
   redCardBanMatches: number;
+  yellowCardAccumulation: YellowCardAccumulationThreshold[];
+  yellowCardResetAfter: number;
 }
 
 export interface CompetitionInjuryRules {
@@ -30,6 +37,7 @@ export interface CompetitionKnockoutRules {
   useAwayGoals: boolean;
   allowExtraTime: boolean;
   allowPenalties: boolean;
+  extraTimeSubsAllowed: number;
 }
 
 export type GroupTiebreaker = "goalDifference" | "goalsFor" | "headToHead" | "fewestGoalsAgainst" | "fairPlay" | "clubReputation" | "teamName";
@@ -56,6 +64,12 @@ export const defaultCompetitionRules: CompetitionRules = {
   },
   suspensions: {
     redCardBanMatches: 1,
+    yellowCardAccumulation: [
+      { yellowCards: 5, suspendMatches: 1 },
+      { yellowCards: 10, suspendMatches: 2 },
+      { yellowCards: 15, suspendMatches: 3 },
+    ],
+    yellowCardResetAfter: 19,
   },
   injuries: {
     moderateMatchesOut: 2,
@@ -74,6 +88,7 @@ export const defaultCompetitionRules: CompetitionRules = {
     useAwayGoals: false,
     allowExtraTime: true,
     allowPenalties: true,
+    extraTimeSubsAllowed: 1,
   },
   group: {
     tiebreakers: ["goalDifference", "goalsFor", "fewestGoalsAgainst", "teamName"],
@@ -131,6 +146,12 @@ export const competitionRulePresets = {
       maxBenchSize: 12,
       maxSubstitutions: 5,
     },
+    suspensions: {
+      yellowCardAccumulation: [
+        { yellowCards: 2, suspendMatches: 1 },
+      ],
+      yellowCardResetAfter: 3,
+    },
     knockout: {
       useAwayGoals: false,
       allowExtraTime: true,
@@ -144,6 +165,13 @@ export const competitionRulePresets = {
     match: {
       maxBenchSize: 15,
       maxSubstitutions: 5,
+    },
+    suspensions: {
+      yellowCardAccumulation: [
+        { yellowCards: 2, suspendMatches: 1 },
+        { yellowCards: 5, suspendMatches: 1 },
+      ],
+      yellowCardResetAfter: 4,
     },
     knockout: {
       useAwayGoals: false,

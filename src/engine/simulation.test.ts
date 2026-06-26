@@ -5,6 +5,8 @@ import { realMadrid, manchesterUnited } from "../data/clubs";
 import { getPlayersByClub } from "../data/players";
 import { carloAncelotti, erikTenHag } from "../data/managers";
 import type { MatchContext } from "../domain/match-context";
+import { createCompetitionRules } from "./competition-rules";
+import type { TeamSetup } from "./match-simulator";
 
 function runSimulation() {
   const homeLineup = buildLineup(getPlayersByClub("real-madrid"), "4-3-3");
@@ -209,4 +211,95 @@ test("availability injury consequences align with injury severities", () => {
       expect(consequence?.expectedMatchesOut).toBeGreaterThan(0);
     }
   }
+});
+
+test("extra-time match produces >90 minutes and allows extra substitution", () => {
+  const homeLineup = buildLineup(getPlayersByClub("real-madrid"), "4-3-3", { benchSize: 12 });
+  const awayLineup = buildLineup(getPlayersByClub("man-utd"), "4-2-3-1", { benchSize: 12 });
+  const homeTactic = buildDefaultTactic("4-3-3", "positive");
+  const awayTactic = buildDefaultTactic("4-2-3-1", "balanced");
+  const context: MatchContext = {
+    venueType: "neutral",
+    weather: "clear",
+    importance: "knockout",
+    competitionType: "continental",
+    isDerby: false,
+  };
+
+  const rules = createCompetitionRules({
+    match: { maxSubstitutions: 5 },
+    knockout: { extraTimeSubsAllowed: 1 },
+  });
+
+  const homeSetup: TeamSetup = {
+    club: realMadrid,
+    manager: carloAncelotti,
+    tactic: homeTactic,
+    outfield: homeLineup.outfield,
+    goalkeeper: homeLineup.goalkeeper,
+    bench: homeLineup.bench,
+    competitionRules: rules,
+  };
+
+  const awaySetup: TeamSetup = {
+    club: manchesterUnited,
+    manager: erikTenHag,
+    tactic: awayTactic,
+    outfield: awayLineup.outfield,
+    goalkeeper: awayLineup.goalkeeper,
+    bench: awayLineup.bench,
+    competitionRules: rules,
+  };
+
+  let found6Subs = false;
+  for (let i = 0; i < 20; i++) {
+    const result = simulateMatch(homeSetup, awaySetup, context, { extraTime: true });
+    const homeSubs = result.substitutions.filter(s => s.team === "home").length;
+    const awaySubs = result.substitutions.filter(s => s.team === "away").length;
+    if (homeSubs >= 6 || awaySubs >= 6) {
+      found6Subs = true;
+      break;
+    }
+  }
+  expect(found6Subs).toBe(true);
+});
+
+test("extra-time match can produce more than 90 minutes of play", () => {
+  const homeLineup = buildLineup(getPlayersByClub("real-madrid"), "4-3-3");
+  const awayLineup = buildLineup(getPlayersByClub("man-utd"), "4-2-3-1");
+  const homeTactic = buildDefaultTactic("4-3-3", "positive");
+  const awayTactic = buildDefaultTactic("4-2-3-1", "balanced");
+  const context: MatchContext = {
+    venueType: "neutral",
+    weather: "clear",
+    importance: "knockout",
+    competitionType: "continental",
+    isDerby: false,
+  };
+
+  const homeSetup: TeamSetup = {
+    club: realMadrid,
+    manager: carloAncelotti,
+    tactic: homeTactic,
+    outfield: homeLineup.outfield,
+    goalkeeper: homeLineup.goalkeeper,
+    bench: homeLineup.bench,
+  };
+
+  const awaySetup: TeamSetup = {
+    club: manchesterUnited,
+    manager: erikTenHag,
+    tactic: awayTactic,
+    outfield: awayLineup.outfield,
+    goalkeeper: awayLineup.goalkeeper,
+    bench: awayLineup.bench,
+  };
+
+  const result = simulateMatch(homeSetup, awaySetup, context, { extraTime: true });
+  const maxMinute = Math.max(
+    ...result.playerRatings.map(r => r.minutesPlayed),
+    ...result.substitutions.map(s => s.minute),
+    ...result.events.map(e => e.minute),
+  );
+  expect(maxMinute).toBeGreaterThan(90);
 });

@@ -40,7 +40,7 @@ test("updateLeagueTableFromMatch updates points and goals", () => {
     awayFormation: "4-2-3-1",
     substitutions: [],
     injuries: [],
-    availability: { suspensions: [], injuries: [] },
+    availability: { suspensions: [], injuries: [], yellowCards: [] },
   });
 
   const home = updated.find(entry => entry.teamId === realMadrid.id);

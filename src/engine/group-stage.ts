@@ -86,18 +86,42 @@ function generateGroupFixturesForTeams(teamIds: string[], group: string): GroupF
   return fixtures;
 }
 
-function getHeadToHeadStats(
+interface MiniTableEntry {
+  teamId: string;
+  teamName: string;
+  points: number;
+  goalDifference: number;
+  goalsFor: number;
+  goalsAgainst: number;
+  played: number;
+}
+
+function buildMiniTable(
   teamIds: string[],
   results: MatchResult[],
-): Map<string, { points: number; goalDifference: number; goalsFor: number; goalsAgainst: number }> {
-  const stats = new Map(teamIds.map(teamId => [teamId, { points: 0, goalDifference: 0, goalsFor: 0, goalsAgainst: 0 }]));
+): Map<string, MiniTableEntry> {
+  const entries = new Map<string, MiniTableEntry>(
+    teamIds.map(id => [id, {
+      teamId: id,
+      teamName: "",
+      points: 0,
+      goalDifference: 0,
+      goalsFor: 0,
+      goalsAgainst: 0,
+      played: 0,
+    }]),
+  );
 
   for (const result of results) {
     if (!teamIds.includes(result.homeTeamId) || !teamIds.includes(result.awayTeamId)) continue;
-    const home = stats.get(result.homeTeamId);
-    const away = stats.get(result.awayTeamId);
-    if (!home || !away) continue;
+    const home = entries.get(result.homeTeamId)!;
+    const away = entries.get(result.awayTeamId)!;
 
+    home.teamName = result.homeTeamId;
+    away.teamName = result.awayTeamId;
+
+    home.played++;
+    away.played++;
     home.goalsFor += result.homeScore;
     home.goalsAgainst += result.awayScore;
     away.goalsFor += result.awayScore;
@@ -115,7 +139,134 @@ function getHeadToHeadStats(
     }
   }
 
-  return stats;
+  return entries;
+}
+
+function getMutualResults(
+  teamIds: string[],
+  results: MatchResult[],
+): MatchResult[] {
+  return results.filter(
+    r => teamIds.includes(r.homeTeamId) && teamIds.includes(r.awayTeamId),
+  );
+}
+
+function compareMiniTableEntries(
+  a: MiniTableEntry,
+  b: MiniTableEntry,
+  tiebreakers: GroupTiebreaker[],
+  fairPlayScores: Map<string, number>,
+  reputationMap: Map<string, number>,
+): number {
+  for (const tiebreaker of tiebreakers) {
+    let diff = 0;
+    switch (tiebreaker) {
+      case "headToHead":
+        break;
+      case "goalDifference":
+        diff = b.goalDifference - a.goalDifference;
+        break;
+      case "goalsFor":
+        diff = b.goalsFor - a.goalsFor;
+        break;
+      case "fewestGoalsAgainst":
+        diff = a.goalsAgainst - b.goalsAgainst;
+        break;
+      case "fairPlay":
+        diff = (fairPlayScores.get(a.teamId) ?? 0) - (fairPlayScores.get(b.teamId) ?? 0);
+        break;
+      case "clubReputation":
+        diff = (reputationMap.get(b.teamId) ?? 0) - (reputationMap.get(a.teamId) ?? 0);
+        break;
+      case "teamName":
+        diff = a.teamName.localeCompare(b.teamName);
+        break;
+    }
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function resolveTiedGroup(
+  teamIds: string[],
+  allResults: MatchResult[],
+  tiebreakers: GroupTiebreaker[],
+  fairPlayScores: Map<string, number>,
+  reputationMap: Map<string, number>,
+  entryMap: Map<string, LeagueTableEntry>,
+  depth: number = 0,
+): string[] {
+  if (teamIds.length <= 1 || depth > 10) return teamIds;
+  if (teamIds.length === 2) {
+    const [aId, bId] = teamIds;
+    const aEntry = entryMap.get(aId)!;
+    const bEntry = entryMap.get(bId)!;
+    const h2h = getMutualResults(teamIds, allResults);
+    const h2hMap = buildMiniTable(teamIds, h2h);
+    const aMini = h2hMap.get(aId)!;
+    const bMini = h2hMap.get(bId)!;
+    aMini.teamName = aEntry.teamName;
+    bMini.teamName = bEntry.teamName;
+
+    const tiebreakersWithoutH2H = tiebreakers.filter(t => t !== "headToHead");
+    const diff = compareMiniTableEntries(aMini, bMini, tiebreakersWithoutH2H, fairPlayScores, reputationMap);
+    if (diff < 0) return [bId, aId];
+    if (diff > 0) return [aId, bId];
+    return [aId, bId].sort((x, y) => (entryMap.get(x)?.teamName ?? "").localeCompare(entryMap.get(y)?.teamName ?? ""));
+  }
+
+  const mutualResults = getMutualResults(teamIds, allResults);
+  const miniTable = buildMiniTable(teamIds, mutualResults);
+
+  for (const [id, entry] of entryMap) {
+    const mini = miniTable.get(id);
+    if (mini) mini.teamName = entry.teamName;
+  }
+
+  const tiebreakersWithoutH2H = tiebreakers.filter(t => t !== "headToHead");
+
+  const sorted = [...miniTable.values()].sort((a, b) =>
+    compareMiniTableEntries(a, b, tiebreakersWithoutH2H, fairPlayScores, reputationMap));
+
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < sorted.length) {
+    const current = sorted[i]!;
+    const tiedSubset: MiniTableEntry[] = [current];
+
+    let j = i + 1;
+    while (j < sorted.length) {
+      const next = sorted[j]!;
+      const diff = compareMiniTableEntries(current, next, tiebreakersWithoutH2H, fairPlayScores, reputationMap);
+      if (diff === 0) {
+        tiedSubset.push(next);
+        j++;
+      } else {
+        break;
+      }
+    }
+
+    if (tiedSubset.length === 1) {
+      result.push(current.teamId);
+    } else {
+      const tiedIds = tiedSubset.map(e => e.teamId);
+      const resolved = resolveTiedGroup(
+        tiedIds,
+        allResults,
+        tiebreakers,
+        fairPlayScores,
+        reputationMap,
+        entryMap,
+        depth + 1,
+      );
+      result.push(...resolved);
+    }
+
+    i = j;
+  }
+
+  return result;
 }
 
 function compareByTiebreaker(
@@ -178,6 +329,7 @@ function sortGroupTable(
 
   const sortedPoints = [...byPoints.keys()].sort((a, b) => b - a);
   const resolved: LeagueTableEntry[] = [];
+  const entryMap = new Map(entries.map(entry => [entry.teamId, entry]));
 
   for (const points of sortedPoints) {
     const bucket = byPoints.get(points) ?? [];
@@ -187,15 +339,20 @@ function sortGroupTable(
     }
 
     const teamIds = bucket.map(entry => entry.teamId);
-    const headToHeadStats = getHeadToHeadStats(teamIds, results);
-    bucket.sort((a, b) => {
-      for (const tiebreaker of rules.group.tiebreakers) {
-        const diff = compareByTiebreaker(a, b, tiebreaker, headToHeadStats, fairPlayScores, reputationMap);
-        if (diff !== 0) return diff;
-      }
-      return a.teamName.localeCompare(b.teamName);
-    });
-    resolved.push(...bucket);
+    const headToHeadStats = buildMiniTable(teamIds, getMutualResults(teamIds, results));
+    const orderedIds = resolveTiedGroup(
+      teamIds,
+      results,
+      rules.group.tiebreakers,
+      fairPlayScores,
+      reputationMap,
+      entryMap,
+    );
+
+    for (const id of orderedIds) {
+      const entry = entryMap.get(id);
+      if (entry) resolved.push(entry);
+    }
   }
 
   return resolved;

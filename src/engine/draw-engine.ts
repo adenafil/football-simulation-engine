@@ -10,6 +10,8 @@ export interface GroupDrawRules {
   groupCount: number;
   preventSameNation: boolean;
   preventSameLeague?: boolean;
+  maxTeamsPerNation?: number;
+  protectedNationPairs?: [string, string][];
 }
 
 export interface GroupDrawResult {
@@ -49,6 +51,19 @@ function canPlaceInGroup(
   }
   if (rules.preventSameLeague && existing.some(existingTeam => existingTeam.club.league === team.club.league)) {
     return false;
+  }
+  if (rules.maxTeamsPerNation !== undefined) {
+    const nationCount = existing.filter(e => e.club.nation === team.club.nation).length;
+    if (nationCount >= rules.maxTeamsPerNation) return false;
+  }
+  if (rules.protectedNationPairs) {
+    for (const [nationA, nationB] of rules.protectedNationPairs) {
+      const hasOpposite = existing.some(e =>
+        (e.club.nation === nationA && team.club.nation === nationB)
+        || (e.club.nation === nationB && team.club.nation === nationA),
+      );
+      if (hasOpposite) return false;
+    }
   }
   return true;
 }

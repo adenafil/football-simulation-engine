@@ -9,6 +9,9 @@ export interface SeasonPlayerStatus {
   playerName: string;
   suspensionMatchesRemaining: number;
   injuryMatchesRemaining: number;
+  yellowCards: number;
+  yellowCardSuspensionMatchesRemaining: number;
+  fitness: number;
   status: SeasonAvailabilityStatus;
 }
 
@@ -24,6 +27,7 @@ function getPlayerDisplayName(player: Player): string {
 
 function deriveStatus(status: SeasonPlayerStatus): SeasonAvailabilityStatus {
   if (status.suspensionMatchesRemaining > 0) return "suspended";
+  if (status.yellowCardSuspensionMatchesRemaining > 0) return "suspended";
   if (status.injuryMatchesRemaining > 0) {
     return status.status === "doubtful" ? "doubtful" : "injured";
   }
@@ -31,7 +35,10 @@ function deriveStatus(status: SeasonPlayerStatus): SeasonAvailabilityStatus {
   return "available";
 }
 
-export function initializeSeasonPlayerStatuses(players: Player[]): Map<string, SeasonPlayerStatus> {
+export function initializeSeasonPlayerStatuses(
+  players: Player[],
+  initialFitness: number = 100,
+): Map<string, SeasonPlayerStatus> {
   return new Map(
     players.map(player => [
       player.id,
@@ -40,6 +47,9 @@ export function initializeSeasonPlayerStatuses(players: Player[]): Map<string, S
         playerName: getPlayerDisplayName(player),
         suspensionMatchesRemaining: 0,
         injuryMatchesRemaining: 0,
+        yellowCards: 0,
+        yellowCardSuspensionMatchesRemaining: 0,
+        fitness: initialFitness,
         status: "available" as const,
       },
     ]),
@@ -55,31 +65,36 @@ export function applyMatchAvailabilityConsequences(
     Array.from(currentStatuses.entries()).map(([playerId, status]) => [playerId, { ...status }]),
   );
 
-  for (const suspension of consequences.suspensions) {
-    const current = nextStatuses.get(suspension.playerId) ?? {
-      playerId: suspension.playerId,
-      playerName: suspension.playerName,
+  function getOrCreate(playerId: string, playerName: string): SeasonPlayerStatus {
+    const existing = nextStatuses.get(playerId);
+    if (existing) {
+      existing.playerName = playerName;
+      return existing;
+    }
+    const created: SeasonPlayerStatus = {
+      playerId,
+      playerName,
       suspensionMatchesRemaining: 0,
       injuryMatchesRemaining: 0,
-      status: "available" as const,
+      yellowCards: 0,
+      yellowCardSuspensionMatchesRemaining: 0,
+      fitness: 100,
+      status: "available",
     };
+    nextStatuses.set(playerId, created);
+    return created;
+  }
 
-    current.playerName = suspension.playerName;
-    current.suspensionMatchesRemaining = Math.max(current.suspensionMatchesRemaining, suspension.matches || rules.suspensions.redCardBanMatches);
-    current.status = deriveStatus(current);
-    nextStatuses.set(suspension.playerId, current);
+  for (const suspension of consequences.suspensions) {
+    const current = getOrCreate(suspension.playerId, suspension.playerName);
+    current.suspensionMatchesRemaining = Math.max(
+      current.suspensionMatchesRemaining,
+      suspension.matches || rules.suspensions.redCardBanMatches,
+    );
   }
 
   for (const injury of consequences.injuries) {
-    const current = nextStatuses.get(injury.playerId) ?? {
-      playerId: injury.playerId,
-      playerName: injury.playerName,
-      suspensionMatchesRemaining: 0,
-      injuryMatchesRemaining: 0,
-      status: "available" as const,
-    };
-
-    current.playerName = injury.playerName;
+    const current = getOrCreate(injury.playerId, injury.playerName);
     const mappedMatchesOut = injury.severity === "moderate"
       ? rules.injuries.moderateMatchesOut
       : injury.severity === "severe"
@@ -91,7 +106,22 @@ export function applyMatchAvailabilityConsequences(
       : injury.severity === "severe"
         ? rules.injuries.severeStatus === "doubtful" ? "doubtful" : deriveStatus(current)
         : deriveStatus(current);
-    nextStatuses.set(injury.playerId, current);
+  }
+
+  for (const yc of consequences.yellowCards) {
+    const current = getOrCreate(yc.playerId, yc.playerName);
+    current.yellowCards += 1;
+    const applicableThresholds = rules.suspensions.yellowCardAccumulation
+      .filter(t => current.yellowCards >= t.yellowCards);
+    const threshold = applicableThresholds.length > 0
+      ? applicableThresholds[applicableThresholds.length - 1]
+      : undefined;
+    if (threshold) {
+      current.yellowCardSuspensionMatchesRemaining = Math.max(
+        current.yellowCardSuspensionMatchesRemaining,
+        threshold.suspendMatches,
+      );
+    }
   }
 
   for (const status of nextStatuses.values()) {
@@ -101,6 +131,35 @@ export function applyMatchAvailabilityConsequences(
   return nextStatuses;
 }
 
+export function updatePlayerFitness(
+  statuses: Map<string, SeasonPlayerStatus>,
+  playerId: string,
+  minutesPlayed: number,
+): Map<string, SeasonPlayerStatus> {
+  const nextStatuses = new Map(statuses);
+  const status = nextStatuses.get(playerId);
+  if (!status) return nextStatuses;
+
+  const fatigue = Math.max(0, minutesPlayed - 60) * 0.3 + (minutesPlayed > 75 ? 5 : 0);
+  const recoveryRate = 8;
+  const newFitness = Math.max(40, Math.min(100, status.fitness - fatigue + recoveryRate));
+
+  nextStatuses.set(playerId, {
+    ...status,
+    fitness: newFitness,
+  });
+  return nextStatuses;
+}
+
+export function getStartingCondition(
+  statuses: Map<string, SeasonPlayerStatus>,
+  playerId: string,
+): number {
+  const status = statuses.get(playerId);
+  if (!status) return 95;
+  return Math.max(40, Math.min(100, status.fitness));
+}
+
 export function tickRecovery(currentStatuses: Map<string, SeasonPlayerStatus>): Map<string, SeasonPlayerStatus> {
   const nextStatuses = new Map<string, SeasonPlayerStatus>();
 
@@ -108,18 +167,13 @@ export function tickRecovery(currentStatuses: Map<string, SeasonPlayerStatus>): 
     const nextStatus: SeasonPlayerStatus = {
       ...status,
       suspensionMatchesRemaining: Math.max(0, status.suspensionMatchesRemaining - 1),
+      yellowCardSuspensionMatchesRemaining: Math.max(0, status.yellowCardSuspensionMatchesRemaining - 1),
       injuryMatchesRemaining: Math.max(0, status.injuryMatchesRemaining - 1),
+      fitness: Math.min(100, status.fitness + 10),
       status: status.status,
     };
 
-    if (nextStatus.suspensionMatchesRemaining > 0) {
-      nextStatus.status = "suspended";
-    } else if (nextStatus.injuryMatchesRemaining > 0) {
-      nextStatus.status = nextStatus.injuryMatchesRemaining === 1 ? "doubtful" : "injured";
-    } else {
-      nextStatus.status = "available";
-    }
-
+    nextStatus.status = deriveStatus(nextStatus);
     nextStatuses.set(playerId, nextStatus);
   }
 
@@ -133,6 +187,20 @@ export function tickRecoveryByMatches(
   let nextStatuses = new Map(currentStatuses);
   for (let i = 0; i < Math.max(0, ticks); i++) {
     nextStatuses = tickRecovery(nextStatuses);
+  }
+  return nextStatuses;
+}
+
+export function resetYellowCards(
+  currentStatuses: Map<string, SeasonPlayerStatus>,
+): Map<string, SeasonPlayerStatus> {
+  const nextStatuses = new Map<string, SeasonPlayerStatus>();
+  for (const [playerId, status] of currentStatuses.entries()) {
+    nextStatuses.set(playerId, {
+      ...status,
+      yellowCards: 0,
+      yellowCardSuspensionMatchesRemaining: 0,
+    });
   }
   return nextStatuses;
 }

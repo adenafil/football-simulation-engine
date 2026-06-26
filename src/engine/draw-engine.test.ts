@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { realMadrid, manchesterUnited } from "../data/clubs";
 import { getPlayersByClub } from "../data/players";
 import { carloAncelotti, erikTenHag } from "../data/managers";
-import { drawGroupsFromPots, seedKnockoutBracket } from "./draw-engine";
+import { drawGroupsFromPots, seedKnockoutBracket, type GroupDrawPot } from "./draw-engine";
 
 test("drawGroupsFromPots assigns teams into groups", () => {
   const result = drawGroupsFromPots([
@@ -97,4 +97,79 @@ test("seedKnockoutBracket creates seeded ties", () => {
   expect(ties.length).toBe(1);
   expect(ties[0]?.homeTeamId).toBe(realMadrid.id);
   expect(ties[0]?.awayTeamId).toBe(manchesterUnited.id);
+});
+
+test("drawGroupsFromPots enforces maxTeamsPerNation constraint", () => {
+  const makeTeam = (id: string, nation: string) => ({
+    club: { ...realMadrid, id, name: id, shortName: id.slice(0, 3).toUpperCase(), nation },
+    manager: carloAncelotti,
+    players: getPlayersByClub("real-madrid"),
+    formation: "4-3-3" as const,
+  });
+
+  const result = drawGroupsFromPots([
+    {
+      name: "Pot A",
+      teams: [
+        makeTeam("team-1", "Spain"),
+        makeTeam("team-2", "England"),
+      ],
+    },
+    {
+      name: "Pot B",
+      teams: [
+        makeTeam("team-3", "Spain"),
+        makeTeam("team-4", "England"),
+      ],
+    },
+  ], {
+    groupCount: 2,
+    preventSameNation: false,
+    maxTeamsPerNation: 1,
+  });
+
+  for (const group of Object.values(result.groups)) {
+    const nations = group.map(t => t.club.nation);
+    const spainCount = nations.filter(n => n === "Spain").length;
+    const englandCount = nations.filter(n => n === "England").length;
+    expect(spainCount).toBeLessThanOrEqual(1);
+    expect(englandCount).toBeLessThanOrEqual(1);
+  }
+});
+
+test("drawGroupsFromPots enforces protectedNationPairs constraint", () => {
+  const makeTeam = (id: string, nation: string) => ({
+    club: { ...realMadrid, id, name: id, shortName: id.slice(0, 3).toUpperCase(), nation },
+    manager: carloAncelotti,
+    players: getPlayersByClub("real-madrid"),
+    formation: "4-3-3" as const,
+  });
+
+  const result = drawGroupsFromPots([
+    {
+      name: "Pot A",
+      teams: [
+        makeTeam("team-1", "Spain"),
+        makeTeam("team-2", "France"),
+      ],
+    },
+    {
+      name: "Pot B",
+      teams: [
+        makeTeam("team-3", "England"),
+        makeTeam("team-4", "Germany"),
+      ],
+    },
+  ], {
+    groupCount: 2,
+    preventSameNation: false,
+    protectedNationPairs: [["Spain", "England"]],
+  });
+
+  for (const group of Object.values(result.groups)) {
+    const nations = group.map(t => t.club.nation);
+    const hasSpain = nations.includes("Spain");
+    const hasEngland = nations.includes("England");
+    expect(hasSpain && hasEngland).toBe(false);
+  }
 });

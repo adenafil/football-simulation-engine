@@ -115,9 +115,16 @@ export interface InjuryAvailabilityConsequence {
   status: "available" | "doubtful" | "unavailable";
 }
 
+export interface YellowCardConsequence {
+  playerId: string;
+  playerName: string;
+  team: "home" | "away";
+}
+
 export interface MatchAvailabilityConsequences {
   suspensions: SuspensionConsequence[];
   injuries: InjuryAvailabilityConsequence[];
+  yellowCards: YellowCardConsequence[];
 }
 
 export interface MatchResult {

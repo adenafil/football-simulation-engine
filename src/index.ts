@@ -58,9 +58,12 @@ export {
 export {
   applyMatchAvailabilityConsequences,
   getAvailableSquad,
+  getStartingCondition,
   initializeSeasonPlayerStatuses,
+  resetYellowCards,
   tickRecoveryByMatches,
   tickRecovery,
+  updatePlayerFitness,
   type SeasonAvailabilityStatus,
   type SeasonPlayerStatus,
   type SeasonSquadAvailability,
@@ -138,6 +141,18 @@ export {
   type SerializedSeasonPlayerStatus,
   type SerializedSeasonSimulationState,
 } from "./engine/season-persistence";
+export {
+  buildGroupStageReport,
+  buildKnockoutBracketReport,
+  buildTournamentReport,
+  exportReportAsJson,
+  type GroupReportRow,
+  type GroupStageReport,
+  type KnockoutBracketReport,
+  type KnockoutMatchSummary,
+  type KnockoutRoundReport,
+  type TournamentReport,
+} from "./engine/competition-reports";
 export {
   computeGoalkeeperPhaseScores,
   computePlayerPhaseScores,
