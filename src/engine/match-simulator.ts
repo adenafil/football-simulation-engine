@@ -7,6 +7,20 @@ import type { RoleDefinition } from "./role-weights";
 import { computeTeamPhaseScores, computeGoalkeeperPhaseScores, type PhaseScores } from "./ratings";
 import { simulatePossession, getPossessionShare } from "./possession-engine";
 import { getStaminaDrainMultiplier } from "./tactic-modifiers";
+import {
+  getScorelineState,
+  getTimePhase,
+  getScorelineModifier,
+  getTimePhaseModifier,
+  getManagerBiasOverlay,
+  getMomentumModifier,
+  createMomentumState,
+  triggerGoalMomentum,
+  mergeOverlays,
+  clampOverlay,
+  getEffectivePhaseScores,
+  type MomentumState,
+} from "./match-state";
 
 export interface LineupPlayer {
   player: Player;
@@ -293,8 +307,6 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
   const homeAdvantage = context.venueType === "home" ? home.club.homeAdvantage
     : context.venueType === "away" ? -home.club.homeAdvantage * 0.3 : 0;
 
-  const possessionShare = getPossessionShare(homeState.phaseScores, awayState.phaseScores, homeAdvantage);
-
   const homeStaminaDrain = getStaminaDrainMultiplier(home.tactic.pressing);
   const awayStaminaDrain = getStaminaDrainMultiplier(away.tactic.pressing);
 
@@ -325,17 +337,39 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
   const totalMinutes = 90 + Math.floor(Math.random() * 5);
   const subCheckMinutes = [50, 55, 60, 65, 70, 75, 80, 83];
 
+  const momentum = createMomentumState();
+
   for (let minute = 1; minute <= totalMinutes; minute++) {
     const avgHomeCondition = getAverageCondition(homeState);
     const avgAwayCondition = getAverageCondition(awayState);
 
-    const isHomeAttacking = Math.random() < possessionShare + (avgHomeCondition - avgAwayCondition) * 0.001;
+    const homeScorelineState = getScorelineState(homeScore, awayScore, true);
+    const awayScorelineState = getScorelineState(homeScore, awayScore, false);
+    const timePhase = getTimePhase(minute);
+
+    const homeScorelineMod = getScorelineModifier(homeScorelineState, timePhase);
+    const awayScorelineMod = getScorelineModifier(awayScorelineState, timePhase);
+    const timeMod = getTimePhaseModifier(timePhase);
+    const homeManagerMod = getManagerBiasOverlay(homeState.manager);
+    const awayManagerMod = getManagerBiasOverlay(awayState.manager);
+    const homeMomentumMod = getMomentumModifier(momentum, true, minute);
+    const awayMomentumMod = getMomentumModifier(momentum, false, minute);
+
+    const homeOverlay = clampOverlay(mergeOverlays(homeScorelineMod, timeMod, homeManagerMod, homeMomentumMod));
+    const awayOverlay = clampOverlay(mergeOverlays(awayScorelineMod, timeMod, awayManagerMod, awayMomentumMod));
+
+    const effectiveHomeScores = getEffectivePhaseScores(homeState.phaseScores, homeOverlay);
+    const effectiveAwayScores = getEffectivePhaseScores(awayState.phaseScores, awayOverlay);
+
+    const effectivePossessionShare = getPossessionShare(effectiveHomeScores, effectiveAwayScores, homeAdvantage);
+
+    const isHomeAttacking = Math.random() < effectivePossessionShare + (avgHomeCondition - avgAwayCondition) * 0.001;
 
     if (isHomeAttacking) homePosCount++;
     else awayPosCount++;
 
     const outcome = simulatePossession({
-      phaseScores: { home: homeState.phaseScores, away: awayState.phaseScores },
+      phaseScores: { home: effectiveHomeScores, away: effectiveAwayScores },
       tactics: { home: home.tactic, away: away.tactic },
       managers: { home: home.manager, away: away.manager },
       isHomeAttacking,
@@ -373,9 +407,12 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
       const scorerName = isHomeAttacking
         ? homeScorers[homeScorers.length - 1]?.name ?? "Unknown"
         : awayScorers[awayScorers.length - 1]?.name ?? "Unknown";
+      const scoringTeam = isHomeAttacking ? "home" as const : "away" as const;
+      triggerGoalMomentum(momentum, scoringTeam, minute);
+
       events.push({
         minute,
-        team: isHomeAttacking ? "home" : "away",
+        team: scoringTeam,
         phase: "goal",
         description: `${minute}' GOAL! ${scorerName} scores! (${homeScore}-${awayScore})`,
       });

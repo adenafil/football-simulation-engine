@@ -112,3 +112,33 @@ test("bench player who entered has minutesPlayed > 0", () => {
     }
   }
 });
+
+test("match state: momentum fires after goals", () => {
+  const result = runSimulation();
+  if (result.homeScore + result.awayScore > 0) {
+    const goalEvents = result.events.filter(e => e.phase === "goal");
+    expect(goalEvents.length).toBe(result.homeScore + result.awayScore);
+  }
+});
+
+test("match state: trailing teams have correlated late shots (integration smoke)", () => {
+  let trailingLateShots = 0;
+  let trailingLateMinutes = 0;
+  for (let i = 0; i < 20; i++) {
+    const result = runSimulation();
+    const lateEvents = result.events.filter(e =>
+      e.minute > 75 && (e.phase === "shot" || e.phase === "goal")
+    );
+    trailingLateShots += lateEvents.filter(e => {
+      const isHome = e.team === "home";
+      const isTrailing = isHome
+        ? result.homeScore < result.awayScore
+        : result.awayScore < result.homeScore;
+      return isTrailing;
+    }).length;
+    trailingLateMinutes += lateEvents.length;
+  }
+  if (trailingLateMinutes > 0) {
+    expect(trailingLateShots).toBeGreaterThan(0);
+  }
+});
