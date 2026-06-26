@@ -2,9 +2,18 @@ import type { Player } from "../domain/player";
 import type { Club } from "../domain/club";
 import type { Manager } from "../domain/manager";
 import type { Tactic } from "../domain/tactic";
-import type { MatchContext, MatchResult, MatchStats, PossessionEvent, PlayerRating, SubstitutionEvent } from "../domain/match-context";
+import type {
+  MatchContext,
+  MatchResult,
+  MatchStats,
+  PlayerMatchStats,
+  PlayerRating,
+  PossessionEvent,
+  PossessionParticipants,
+  SubstitutionEvent,
+} from "../domain/match-context";
 import type { RoleDefinition } from "./role-weights";
-import { computeTeamPhaseScores, computeGoalkeeperPhaseScores, type PhaseScores } from "./ratings";
+import { computeTeamPhaseScores, computeGoalkeeperPhaseScores, computeMatchPlayerRating, type PhaseScores } from "./ratings";
 import { simulatePossession, getPossessionShare } from "./possession-engine";
 import { getStaminaDrainMultiplier } from "./tactic-modifiers";
 import {
@@ -19,7 +28,6 @@ import {
   mergeOverlays,
   clampOverlay,
   getEffectivePhaseScores,
-  type MomentumState,
 } from "./match-state";
 
 export interface LineupPlayer {
@@ -61,8 +69,23 @@ interface TeamMatchState {
   gkPhaseScores: PhaseScores;
 }
 
+interface PlayerMatchAccumulator extends PlayerMatchStats {
+  player: Player;
+}
+
+interface PossessionSelectionContext {
+  attackingState: TeamMatchState;
+  defendingState: TeamMatchState;
+  minute: number;
+  attackingTeam: "home" | "away";
+}
+
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function clamp(value: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function createTeamMatchState(team: TeamSetup): TeamMatchState {
@@ -136,6 +159,287 @@ function updateActivePlayerConditions(state: TeamMatchState, staminaDrain: numbe
 
 function updateGoalkeeperCondition(gk: LineupPlayer, minute: number): number {
   return Math.max(70, 95 - (minute / 90) * 5);
+}
+
+function createInitialPlayerMatchStats(player: Player, team: "home" | "away"): PlayerMatchAccumulator {
+  return {
+    player,
+    playerId: player.id,
+    name: player.name,
+    team,
+    minutesPlayed: 0,
+    goals: 0,
+    assists: 0,
+    shots: 0,
+    shotsOnTarget: 0,
+    keyPasses: 0,
+    passesCompleted: 0,
+    tackles: 0,
+    interceptions: 0,
+    foulsCommitted: 0,
+    yellowCards: 0,
+    redCards: 0,
+  };
+}
+
+function initializePlayerStats(home: TeamSetup, away: TeamSetup): Map<string, PlayerMatchAccumulator> {
+  const stats = new Map<string, PlayerMatchAccumulator>();
+  const addTeam = (team: TeamSetup, side: "home" | "away") => {
+    for (const lineupPlayer of [team.goalkeeper, ...team.outfield, ...team.bench]) {
+      if (!stats.has(lineupPlayer.player.id)) {
+        stats.set(lineupPlayer.player.id, createInitialPlayerMatchStats(lineupPlayer.player, side));
+      }
+    }
+  };
+
+  addTeam(home, "home");
+  addTeam(away, "away");
+  return stats;
+}
+
+function getPlayerStateById(state: TeamMatchState, playerId: string | undefined): ActivePlayerState | null {
+  if (!playerId) return null;
+  return state.activeOutfield.find(playerState => playerState.lineup.player.id === playerId) ?? null;
+}
+
+function getPositionBias(position: string, allowed: string[]): number {
+  if (allowed.includes(position)) return 1.25;
+  if (position.startsWith("AM") && allowed.includes("AML")) return 1.1;
+  return 1;
+}
+
+function getConditionFactor(condition: number): number {
+  return clamp(condition / 100, 0.55, 1.05);
+}
+
+function weightedPick<T>(items: T[], scorer: (item: T) => number): T | null {
+  if (items.length === 0) return null;
+
+  const scored = items.map(item => ({ item, score: Math.max(0.01, scorer(item)) }));
+  const total = scored.reduce((sum, entry) => sum + entry.score, 0);
+  let roll = Math.random() * total;
+
+  for (const entry of scored) {
+    roll -= entry.score;
+    if (roll <= 0) return entry.item;
+  }
+
+  return scored[scored.length - 1]?.item ?? null;
+}
+
+function pickFromActivePlayers(
+  state: TeamMatchState,
+  positions: string[],
+  selector: (playerState: ActivePlayerState) => number,
+  excludedIds: string[] = [],
+): ActivePlayerState | null {
+  const excluded = new Set(excludedIds);
+  const candidates = state.activeOutfield.filter(playerState => !excluded.has(playerState.lineup.player.id));
+  const picked = weightedPick(candidates, playerState => {
+    const player = playerState.lineup.player;
+    const tech = player.attributes.technical;
+    const mental = player.attributes.mental;
+    const physical = player.attributes.physical;
+    const roleSuitability = player.roleSuitability[playerState.lineup.role.name] ?? 60;
+    const positionBias = getPositionBias(playerState.lineup.position, positions);
+    const roleBias = 0.8 + (
+      playerState.lineup.role.phaseWeights.buildUp +
+      playerState.lineup.role.phaseWeights.progression +
+      playerState.lineup.role.phaseWeights.finalThird +
+      playerState.lineup.role.phaseWeights.finishing
+    ) * 0.2;
+
+    return selector(playerState)
+      * (roleSuitability / 100)
+      * positionBias
+      * roleBias
+      * getConditionFactor(playerState.currentCondition)
+      * (1 + (tech.technique + mental.decisions + physical.stamina) / 600);
+  });
+
+  return picked;
+}
+
+function pickBuildUpActor(state: TeamMatchState): ActivePlayerState | null {
+  return pickFromActivePlayers(state, ["CB", "DM", "LB", "RB", "CM"], playerState => {
+    const player = playerState.lineup.player;
+    return player.attributes.technical.passing * 0.3
+      + player.attributes.technical.firstTouch * 0.2
+      + player.attributes.mental.composure * 0.2
+      + player.attributes.mental.decisions * 0.15
+      + player.attributes.technical.technique * 0.15;
+  });
+}
+
+function pickProgressionActor(state: TeamMatchState, buildUpActorId?: string): ActivePlayerState | null {
+  return pickFromActivePlayers(state, ["CM", "LM", "RM", "AML", "AMR", "LWB", "RWB", "AMC"], playerState => {
+    const player = playerState.lineup.player;
+    return player.attributes.technical.dribbling * 0.22
+      + player.attributes.technical.passing * 0.2
+      + player.attributes.mental.vision * 0.16
+      + player.attributes.technical.technique * 0.16
+      + player.attributes.physical.pace * 0.14
+      + player.attributes.mental.workRate * 0.12;
+  }, buildUpActorId ? [buildUpActorId] : []);
+}
+
+function pickCreator(state: TeamMatchState, progressionActorId?: string): ActivePlayerState | null {
+  return pickFromActivePlayers(state, ["AMC", "AML", "AMR", "LM", "RM", "ST", "CM"], playerState => {
+    const player = playerState.lineup.player;
+    return player.attributes.mental.vision * 0.22
+      + player.attributes.mental.flair * 0.16
+      + player.attributes.technical.passing * 0.22
+      + player.attributes.technical.dribbling * 0.14
+      + player.attributes.technical.crossing * 0.1
+      + player.attributes.mental.decisions * 0.08
+      + player.attributes.mental.offTheBall * 0.08;
+  }, progressionActorId ? [progressionActorId] : []);
+}
+
+function pickShooter(state: TeamMatchState, creatorId?: string): ActivePlayerState | null {
+  return pickFromActivePlayers(state, ["ST", "CF", "AML", "AMR", "AMC"], playerState => {
+    const player = playerState.lineup.player;
+    return player.attributes.technical.finishing * 0.3
+      + player.attributes.mental.composure * 0.2
+      + player.attributes.mental.offTheBall * 0.18
+      + player.attributes.mental.anticipation * 0.14
+      + player.attributes.technical.technique * 0.1
+      + player.attributes.technical.longShots * 0.08;
+  }, creatorId ? [creatorId] : []);
+}
+
+function pickDefender(state: TeamMatchState): ActivePlayerState | null {
+  return pickFromActivePlayers(state, ["CB", "DM", "LB", "RB"], playerState => {
+    const player = playerState.lineup.player;
+    return player.attributes.technical.tackling * 0.24
+      + player.attributes.technical.marking * 0.2
+      + player.attributes.mental.positioning * 0.18
+      + player.attributes.mental.concentration * 0.12
+      + player.attributes.mental.aggression * 0.08
+      + player.attributes.mental.bravery * 0.08
+      + player.attributes.physical.strength * 0.1;
+  });
+}
+
+function selectPossessionParticipants(context: PossessionSelectionContext): PossessionParticipants {
+  const buildUpActor = pickBuildUpActor(context.attackingState);
+  const progressionActor = pickProgressionActor(context.attackingState, buildUpActor?.lineup.player.id);
+  const creator = pickCreator(context.attackingState, progressionActor?.lineup.player.id ?? buildUpActor?.lineup.player.id);
+  const shooter = pickShooter(context.attackingState, creator?.lineup.player.id);
+  const defender = pickDefender(context.defendingState);
+  const assisterId = creator && shooter && creator.lineup.player.id !== shooter.lineup.player.id
+    ? creator.lineup.player.id
+    : progressionActor?.lineup.player.id;
+
+  return {
+    buildUpPlayerId: buildUpActor?.lineup.player.id,
+    progressionPlayerId: progressionActor?.lineup.player.id,
+    creatorPlayerId: creator?.lineup.player.id,
+    shooterPlayerId: shooter?.lineup.player.id ?? creator?.lineup.player.id ?? buildUpActor?.lineup.player.id,
+    assisterPlayerId: assisterId,
+    defenderPlayerId: defender?.lineup.player.id,
+  };
+}
+
+function incrementStat(
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  playerId: string | undefined,
+  key: keyof PlayerMatchStats,
+  amount: number = 1,
+): void {
+  if (!playerId) return;
+  const stats = playerStats.get(playerId);
+  if (!stats) return;
+  const currentValue = stats[key];
+  if (typeof currentValue === "number") {
+    (stats[key] as number) = currentValue + amount;
+  }
+}
+
+function recordPossessionStats(
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  participants: PossessionParticipants,
+  attackingTeam: "home" | "away",
+  outcome: ReturnType<typeof simulatePossession>,
+): void {
+  if (["progression", "finalThird", "shot", "goal"].includes(outcome.attackingPhase)) {
+    incrementStat(playerStats, participants.buildUpPlayerId, "passesCompleted");
+  }
+
+  if (["finalThird", "shot", "goal"].includes(outcome.attackingPhase)) {
+    incrementStat(playerStats, participants.progressionPlayerId, "passesCompleted");
+  }
+
+  if (outcome.shot) {
+    incrementStat(playerStats, participants.creatorPlayerId, "keyPasses");
+    incrementStat(playerStats, participants.shooterPlayerId, "shots");
+  }
+
+  if (outcome.shotOnTarget) {
+    incrementStat(playerStats, participants.shooterPlayerId, "shotsOnTarget");
+  }
+
+  if (outcome.goal) {
+    incrementStat(playerStats, participants.shooterPlayerId, "goals");
+    if (participants.assisterPlayerId && participants.assisterPlayerId !== participants.shooterPlayerId) {
+      incrementStat(playerStats, participants.assisterPlayerId, "assists");
+    }
+  }
+
+  if (!outcome.goal && !outcome.shot && outcome.foul) {
+    incrementStat(playerStats, participants.defenderPlayerId, "foulsCommitted");
+  }
+
+  if (outcome.yellowCard) {
+    incrementStat(playerStats, participants.defenderPlayerId, "yellowCards");
+  }
+
+  if (outcome.redCard) {
+    incrementStat(playerStats, participants.defenderPlayerId, "redCards");
+  }
+
+  if (outcome.attackingPhase === "progression" && !outcome.shot) {
+    incrementStat(playerStats, participants.defenderPlayerId, "interceptions");
+  }
+
+  if (outcome.attackingPhase === "finalThird" && !outcome.shot) {
+    incrementStat(playerStats, participants.defenderPlayerId, "tackles");
+  }
+}
+
+function updateMinutesPlayed(
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  state: TeamMatchState,
+  totalMinutes: number,
+): void {
+  for (const playerState of state.activeOutfield) {
+    const minutesPlayed = playerState.entryMinute === 0 ? totalMinutes : totalMinutes - playerState.entryMinute;
+    const stats = playerStats.get(playerState.lineup.player.id);
+    if (stats) stats.minutesPlayed = Math.max(stats.minutesPlayed, Math.min(minutesPlayed, totalMinutes));
+  }
+
+  const goalkeeperStats = playerStats.get(state.goalkeeper.player.id);
+  if (goalkeeperStats) {
+    goalkeeperStats.minutesPlayed = totalMinutes;
+  }
+
+  for (const benchPlayer of state.bench) {
+    if (!benchPlayer.used) continue;
+    const stats = playerStats.get(benchPlayer.lineup.player.id);
+    if (stats && stats.minutesPlayed === 0) {
+      stats.minutesPlayed = Math.max(1, totalMinutes - 55);
+    }
+  }
+}
+
+function recordSubstitutedPlayerMinutes(
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  playerOut: ActivePlayerState,
+  minute: number,
+): void {
+  const stats = playerStats.get(playerOut.lineup.player.id);
+  if (!stats) return;
+  stats.minutesPlayed = Math.max(stats.minutesPlayed, Math.max(1, minute - playerOut.entryMinute));
 }
 
 const HIGH_FATIGUE_ROLES = new Set([
@@ -303,6 +607,7 @@ function getScoreDiff(homeScore: number, awayScore: number, isHome: boolean): nu
 export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchContext): MatchResult {
   const homeState = createTeamMatchState(home);
   const awayState = createTeamMatchState(away);
+  const playerStats = initializePlayerStats(home, away);
 
   const homeAdvantage = context.venueType === "home" ? home.club.homeAdvantage
     : context.venueType === "away" ? -home.club.homeAdvantage * 0.3 : 0;
@@ -327,9 +632,6 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
 
   const events: PossessionEvent[] = [];
   const allSubstitutions: SubstitutionEvent[] = [];
-
-  const homeScorers: Player[] = [];
-  const awayScorers: Player[] = [];
 
   let homePosCount = 0;
   let awayPosCount = 0;
@@ -368,6 +670,13 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     if (isHomeAttacking) homePosCount++;
     else awayPosCount++;
 
+    const participants = selectPossessionParticipants({
+      attackingState: isHomeAttacking ? homeState : awayState,
+      defendingState: isHomeAttacking ? awayState : homeState,
+      minute,
+      attackingTeam: isHomeAttacking ? "home" : "away",
+    });
+
     const outcome = simulatePossession({
       phaseScores: { home: effectiveHomeScores, away: effectiveAwayScores },
       tactics: { home: home.tactic, away: away.tactic },
@@ -377,6 +686,8 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
       homeStamina: avgHomeCondition,
       awayStamina: avgAwayCondition,
     });
+
+    recordPossessionStats(playerStats, participants, isHomeAttacking ? "home" : "away", outcome);
 
     if (outcome.shot) {
       if (isHomeAttacking) stats.shots.home++;
@@ -389,25 +700,18 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     }
 
     if (outcome.goal) {
+      const scoringTeam = isHomeAttacking ? "home" as const : "away" as const;
+      const scorerId = participants.shooterPlayerId;
+      const scorerName = scorerId
+        ? playerStats.get(scorerId)?.name ?? "Unknown"
+        : "Unknown";
+
       if (isHomeAttacking) {
         homeScore++;
-        const activePlayers = homeState.activeOutfield;
-        if (activePlayers.length > 0) {
-          const scorer = activePlayers[randomInt(0, activePlayers.length - 1)]!.lineup.player;
-          homeScorers.push(scorer);
-        }
       } else {
         awayScore++;
-        const activePlayers = awayState.activeOutfield;
-        if (activePlayers.length > 0) {
-          const scorer = activePlayers[randomInt(0, activePlayers.length - 1)]!.lineup.player;
-          awayScorers.push(scorer);
-        }
       }
-      const scorerName = isHomeAttacking
-        ? homeScorers[homeScorers.length - 1]?.name ?? "Unknown"
-        : awayScorers[awayScorers.length - 1]?.name ?? "Unknown";
-      const scoringTeam = isHomeAttacking ? "home" as const : "away" as const;
+
       triggerGoalMomentum(momentum, scoringTeam, minute);
 
       events.push({
@@ -415,6 +719,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
         team: scoringTeam,
         phase: "goal",
         description: `${minute}' GOAL! ${scorerName} scores! (${homeScore}-${awayScore})`,
+        participants,
       });
     } else if (outcome.shotOnTarget) {
       events.push({
@@ -422,6 +727,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
         team: isHomeAttacking ? "home" : "away",
         phase: "shot",
         description: `${minute}' ${isHomeAttacking ? "Home" : "Away"} shot saved (${Math.round(outcome.xG * 100)}% xG)`,
+        participants,
       });
     }
 
@@ -458,7 +764,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     updateActivePlayerConditions(homeState, homeStaminaDrain, minute);
     updateActivePlayerConditions(awayState, awayStaminaDrain, minute);
 
-    const gkCondition = updateGoalkeeperCondition(home.goalkeeper, minute);
+    updateGoalkeeperCondition(home.goalkeeper, minute);
     updateGoalkeeperCondition(away.goalkeeper, minute);
 
     if (subCheckMinutes.includes(minute)) {
@@ -470,6 +776,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
         if (playerOut) {
           const replacement = pickBenchReplacement(homeState, playerOut, homeScoreDiff);
           if (replacement) {
+            recordSubstitutedPlayerMinutes(playerStats, playerOut, minute);
             const subEvent = applySubstitution(homeState, playerOut, replacement, minute, homeScoreDiff);
             subEvent.team = "home";
             allSubstitutions.push(subEvent);
@@ -488,6 +795,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
         if (playerOut) {
           const replacement = pickBenchReplacement(awayState, playerOut, awayScoreDiff);
           if (replacement) {
+            recordSubstitutedPlayerMinutes(playerStats, playerOut, minute);
             const subEvent = applySubstitution(awayState, playerOut, replacement, minute, awayScoreDiff);
             subEvent.team = "away";
             allSubstitutions.push(subEvent);
@@ -506,85 +814,36 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
   stats.possession.home = Math.round((homePosCount / (homePosCount + awayPosCount)) * 100);
   stats.possession.away = 100 - stats.possession.home;
 
-  const allPlayersMap = new Map<string, { player: Player; isHome: boolean; minutesPlayed: number }>();
+  updateMinutesPlayed(playerStats, homeState, totalMinutes);
+  updateMinutesPlayed(playerStats, awayState, totalMinutes);
 
-  for (const ap of homeState.activeOutfield) {
-    const id = ap.lineup.player.id;
-    const mins = (ap.entryMinute === 0) ? totalMinutes : totalMinutes - ap.entryMinute;
-    if (!allPlayersMap.has(id)) {
-      allPlayersMap.set(id, { player: ap.lineup.player, isHome: true, minutesPlayed: Math.min(mins, totalMinutes) });
-    } else {
-      const existing = allPlayersMap.get(id)!;
-      existing.minutesPlayed = Math.max(existing.minutesPlayed, mins);
-    }
-  }
+  const playerMatchStats = Array.from(playerStats.values())
+    .filter(statsEntry => statsEntry.minutesPlayed > 0)
+    .map(({ player, ...statsEntry }) => statsEntry)
+    .sort((a, b) => b.minutesPlayed - a.minutesPlayed || b.goals - a.goals);
 
-  allPlayersMap.set(home.goalkeeper.player.id, {
-    player: home.goalkeeper.player,
-    isHome: true,
-    minutesPlayed: totalMinutes,
-  });
+  const playerRatings: PlayerRating[] = Array.from(playerStats.values())
+    .filter(statsEntry => statsEntry.minutesPlayed > 0)
+    .map(statsEntry => {
+      const didWin = statsEntry.team === "home" ? homeScore > awayScore : awayScore > homeScore;
+      const keptCleanSheet = statsEntry.team === "home" ? awayScore === 0 : homeScore === 0;
+      return {
+        playerId: statsEntry.playerId,
+        name: statsEntry.name,
+        rating: computeMatchPlayerRating(statsEntry.player, statsEntry, didWin, keptCleanSheet),
+        goals: statsEntry.goals,
+        assists: statsEntry.assists,
+        keyPasses: statsEntry.keyPasses,
+        tackles: statsEntry.tackles,
+        interceptions: statsEntry.interceptions,
+        passesCompleted: statsEntry.passesCompleted,
+        shots: statsEntry.shots,
+        shotsOnTarget: statsEntry.shotsOnTarget,
+        minutesPlayed: statsEntry.minutesPlayed,
+      };
+    });
 
-  for (const ap of awayState.activeOutfield) {
-    const id = ap.lineup.player.id;
-    const mins = (ap.entryMinute === 0) ? totalMinutes : totalMinutes - ap.entryMinute;
-    if (!allPlayersMap.has(id)) {
-      allPlayersMap.set(id, { player: ap.lineup.player, isHome: false, minutesPlayed: Math.min(mins, totalMinutes) });
-    } else {
-      const existing = allPlayersMap.get(id)!;
-      existing.minutesPlayed = Math.max(existing.minutesPlayed, mins);
-    }
-  }
-
-  allPlayersMap.set(away.goalkeeper.player.id, {
-    player: away.goalkeeper.player,
-    isHome: false,
-    minutesPlayed: totalMinutes,
-  });
-
-  for (const b of homeState.bench) {
-    if (b.used) {
-      const id = b.lineup.player.id;
-      if (!allPlayersMap.has(id)) {
-        allPlayersMap.set(id, { player: b.lineup.player, isHome: true, minutesPlayed: totalMinutes - 55 });
-      }
-    }
-  }
-
-  for (const b of awayState.bench) {
-    if (b.used) {
-      const id = b.lineup.player.id;
-      if (!allPlayersMap.has(id)) {
-        allPlayersMap.set(id, { player: b.lineup.player, isHome: false, minutesPlayed: totalMinutes - 55 });
-      }
-    }
-  }
-
-  const playerRatings: PlayerRating[] = Array.from(allPlayersMap.values()).map(({ player, isHome, minutesPlayed }) => {
-    const scored = isHome
-      ? homeScorers.filter(s => s.id === player.id).length
-      : awayScorers.filter(s => s.id === player.id).length;
-    const mins = Math.max(1, minutesPlayed);
-    return {
-      playerId: player.id,
-      name: player.name,
-      rating: 6 + Math.random() * 2 + scored * 0.8 + (mins / 90) * 0.5,
-      goals: scored,
-      assists: 0,
-      keyPasses: Math.floor(Math.random() * 3),
-      tackles: Math.floor(Math.random() * 4),
-      interceptions: Math.floor(Math.random() * 3),
-      passesCompleted: Math.floor(Math.random() * 30 + 20),
-      shots: 0,
-      shotsOnTarget: 0,
-      minutesPlayed: mins,
-    };
-  });
-
-  const allScorers = [...homeScorers, ...awayScorers];
-  const manOfMatch = allScorers.length > 0
-    ? allScorers[0]!.name
-    : playerRatings.sort((a, b) => b.rating - a.rating)[0]!.name;
+  const manOfMatch = [...playerRatings].sort((a, b) => b.rating - a.rating)[0]?.name ?? "Unknown";
 
   return {
     homeTeamId: home.club.id,
@@ -595,6 +854,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     awayScore,
     events,
     stats,
+    playerMatchStats,
     playerRatings,
     manOfMatch,
     homeFormation: home.tactic.formation,

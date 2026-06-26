@@ -1,4 +1,5 @@
 import type { Player, TechnicalAttributes, MentalAttributes, PhysicalAttributes, GoalkeepingAttributes } from "../domain/player";
+import type { PlayerMatchStats } from "../domain/match-context";
 import type { Tactic } from "../domain/tactic";
 import type { RoleDefinition, PhaseWeights } from "./role-weights";
 import { getRoleDefinition } from "./role-weights";
@@ -282,4 +283,41 @@ export function computeTeamStrength(
     transition: phaseScores.transitionAttack + phaseScores.transitionDefense,
     overall: 0,
   };
+}
+
+export function computeMatchPlayerRating(
+  player: Player,
+  matchStats: PlayerMatchStats,
+  didWin: boolean,
+  keptCleanSheet: boolean,
+): number {
+  const isGoalkeeper = player.positions.includes("GK");
+  const isDefensivePlayer = isGoalkeeper || player.positions.some(position => ["CB", "LB", "RB", "LWB", "RWB", "DM"].includes(position));
+
+  let rating = 6.0;
+  rating += Math.min(0.7, (matchStats.minutesPlayed / 90) * 0.6);
+  rating += matchStats.goals * 1.1;
+  rating += matchStats.assists * 0.8;
+  rating += matchStats.shotsOnTarget * 0.15;
+  rating += matchStats.keyPasses * 0.12;
+  rating += Math.min(0.6, matchStats.passesCompleted / 80);
+
+  if (isDefensivePlayer) {
+    rating += matchStats.tackles * 0.08;
+    rating += matchStats.interceptions * 0.1;
+    if (keptCleanSheet) rating += 0.45;
+  } else {
+    rating += matchStats.tackles * 0.03;
+    rating += matchStats.interceptions * 0.04;
+  }
+
+  if (didWin) rating += 0.15;
+  rating -= matchStats.yellowCards * 0.25;
+  rating -= matchStats.redCards * 1.0;
+
+  if (matchStats.shots >= 3 && matchStats.goals === 0) {
+    rating -= 0.15;
+  }
+
+  return clamp(rating, 4.5, 10);
 }

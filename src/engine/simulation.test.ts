@@ -2,12 +2,13 @@ import { test, expect } from "bun:test";
 import { simulateMatch } from "./match-simulator";
 import { buildLineup, buildDefaultTactic } from "../index";
 import { realMadrid, manchesterUnited } from "../data/clubs";
+import { getPlayersByClub } from "../data/players";
 import { carloAncelotti, erikTenHag } from "../data/managers";
 import type { MatchContext } from "../domain/match-context";
 
 function runSimulation() {
-  const homeLineup = buildLineup("real-madrid", "4-3-3");
-  const awayLineup = buildLineup("man-utd", "4-2-3-1");
+  const homeLineup = buildLineup(getPlayersByClub("real-madrid"), "4-3-3");
+  const awayLineup = buildLineup(getPlayersByClub("man-utd"), "4-2-3-1");
 
   const homeTactic = buildDefaultTactic("4-3-3", "positive");
   const awayTactic = buildDefaultTactic("4-2-3-1", "balanced");
@@ -84,10 +85,18 @@ test("xG trend: Real Madrid should have higher avg xG than Man Utd", () => {
 });
 
 test("lineup building produces 11 players + bench", () => {
-  const lineup = buildLineup("real-madrid", "4-3-3");
+  const lineup = buildLineup(getPlayersByClub("real-madrid"), "4-3-3");
   expect(lineup.outfield.length).toBe(10);
   expect(lineup.goalkeeper).toBeDefined();
   expect(lineup.bench.length).toBeGreaterThanOrEqual(1);
+});
+
+test("player match stats align with match goal totals", () => {
+  const result = runSimulation();
+  const totalGoals = result.playerMatchStats.reduce((sum, player) => sum + player.goals, 0);
+  const totalAssists = result.playerMatchStats.reduce((sum, player) => sum + player.assists, 0);
+  expect(totalGoals).toBe(result.homeScore + result.awayScore);
+  expect(totalAssists).toBeLessThanOrEqual(totalGoals);
 });
 
 test("simulation produces substitution events", () => {

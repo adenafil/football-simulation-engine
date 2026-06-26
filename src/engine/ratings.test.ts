@@ -1,8 +1,9 @@
 import { test, expect } from "bun:test";
-import { computePlayerRating, computeTechnicalScore, computeMentalScore, computePhysicalScore, computeGoalkeepingScore, computeTeamPhaseScores } from "./ratings";
+import { computeMatchPlayerRating, computePlayerRating, computeGoalkeepingScore, computeTeamPhaseScores } from "./ratings";
 import { getRoleDefinition } from "./role-weights";
 import { mbappe, courtois, viniJr, bellingham } from "../data/players";
 import type { Tactic, Formation } from "../domain/tactic";
+import type { PlayerMatchStats } from "../domain/match-context";
 
 test("Mbappe has high technical score", () => {
   const rating = computePlayerRating(mbappe);
@@ -64,4 +65,37 @@ test("Team phase scores produce reasonable values", () => {
   expect(scores.progression).toBeGreaterThan(0);
   expect(scores.finalThird).toBeGreaterThan(0);
   expect(scores.finishing).toBeGreaterThan(0);
+});
+
+test("match player rating rewards goals and assists", () => {
+  const eliteForwardStats: PlayerMatchStats = {
+    playerId: mbappe.id,
+    name: mbappe.name,
+    team: "home",
+    minutesPlayed: 90,
+    goals: 2,
+    assists: 1,
+    shots: 5,
+    shotsOnTarget: 3,
+    keyPasses: 2,
+    passesCompleted: 24,
+    tackles: 0,
+    interceptions: 0,
+    foulsCommitted: 0,
+    yellowCards: 0,
+    redCards: 0,
+  };
+
+  const quietForwardStats: PlayerMatchStats = {
+    ...eliteForwardStats,
+    goals: 0,
+    assists: 0,
+    shots: 1,
+    shotsOnTarget: 0,
+    keyPasses: 0,
+  };
+
+  const eliteRating = computeMatchPlayerRating(mbappe, eliteForwardStats, true, false);
+  const quietRating = computeMatchPlayerRating(mbappe, quietForwardStats, true, false);
+  expect(eliteRating).toBeGreaterThan(quietRating);
 });

@@ -25,11 +25,39 @@ export interface SubstitutionEvent {
   reason: "fatigue" | "chasing-goal" | "protect-lead";
 }
 
+export interface PossessionParticipants {
+  buildUpPlayerId?: string;
+  progressionPlayerId?: string;
+  creatorPlayerId?: string;
+  shooterPlayerId?: string;
+  assisterPlayerId?: string;
+  defenderPlayerId?: string;
+}
+
 export interface PossessionEvent {
   minute: number;
   team: "home" | "away";
   phase: "buildUp" | "progression" | "finalThird" | "shot" | "goal" | "substitution";
   description: string;
+  participants?: PossessionParticipants;
+}
+
+export interface PlayerMatchStats {
+  playerId: string;
+  name: string;
+  team: "home" | "away";
+  minutesPlayed: number;
+  goals: number;
+  assists: number;
+  shots: number;
+  shotsOnTarget: number;
+  keyPasses: number;
+  passesCompleted: number;
+  tackles: number;
+  interceptions: number;
+  foulsCommitted: number;
+  yellowCards: number;
+  redCards: number;
 }
 
 export interface PlayerRating {
@@ -68,6 +96,7 @@ export interface MatchResult {
   awayScore: number;
   events: PossessionEvent[];
   stats: MatchStats;
+  playerMatchStats: PlayerMatchStats[];
   playerRatings: PlayerRating[];
   manOfMatch: string;
   homeFormation: string;
