@@ -1,26 +1,16 @@
 import type { Player, Position, Role } from "./domain/player";
 import type { Club } from "./domain/club";
 import type { Manager } from "./domain/manager";
-import type { Tactic, Formation, Mentality, Tempo, Width, PressingIntensity, DefensiveLine, Directness } from "./domain/tactic";
-import type { MatchContext, MatchResult, VenueType, Weather, MatchImportance } from "./domain/match-context";
-import type { RoleDefinition } from "./engine/role-weights";
+import type { Tactic, Formation, Mentality } from "./domain/tactic";
+import type { MatchContext, MatchResult, VenueType } from "./domain/match-context";
 import { getRoleDefinition, findBestRoleForPlayer } from "./engine/role-weights";
 import { simulateMatch, type LineupPlayer, type TeamSetup } from "./engine/match-simulator";
-import { computePlayerRating, computeTeamStrength } from "./engine/ratings";
+import { computePlayerRating } from "./engine/ratings";
 import { getPlayersByClub } from "./data/players";
 import { getClubById } from "./data/clubs";
 import { getManagerById } from "./data/managers";
 
 export type { Player, Club, Manager, Tactic, Formation, MatchContext, MatchResult };
-
-const formationMap: Record<string, { defenders: number; midfielders: number; attackers: number }> = {
-  "4-2-3-1": { defenders: 4, midfielders: 3, attackers: 3 },
-  "4-4-2": { defenders: 4, midfielders: 4, attackers: 2 },
-  "4-4-2 Diamond": { defenders: 4, midfielders: 4, attackers: 2 },
-  "4-3-3": { defenders: 4, midfielders: 3, attackers: 3 },
-  "3-5-2": { defenders: 3, midfielders: 5, attackers: 2 },
-  "3-4-3": { defenders: 3, midfielders: 4, attackers: 3 },
-};
 
 function getFormationPositions(formation: Formation): string[] {
   switch (formation) {
@@ -159,11 +149,59 @@ function selectBestPlayerForPosition(
   return bestPlayer;
 }
 
+function selectBestRoleForPlayer(player: Player, formation: Formation, position: string): Role {
+  const possibleRoles = getDefaultRoles(formation, position);
+  let chosenRole: Role = possibleRoles[0] ?? "Central Midfielder";
+  for (const r of possibleRoles) {
+    if (player.roleSuitability[r] !== undefined) {
+      const suit = player.roleSuitability[r]!;
+      const currentSuit = player.roleSuitability[chosenRole] ?? 0;
+      if (suit > currentSuit) {
+        chosenRole = r;
+      }
+    }
+  }
+  return chosenRole;
+}
+
+function toLineupPlayer(player: Player, roleDef: RoleDefinition, position: string): LineupPlayer {
+  return { player, role: roleDef, position };
+}
+
+function buildBench(starters: LineupPlayer[], allPlayers: Player[], usedIds: Set<string>): LineupPlayer[] {
+  const remaining = allPlayers.filter(p => !usedIds.has(p.id));
+
+  const prioritized = remaining.map(p => {
+    const rating = computePlayerRating(p).overall;
+    const gk = p.positions.includes("GK") ? -30 : 0;
+    const positional = p.positions.length;
+    return { player: p, score: rating + gk + positional * 2 };
+  });
+
+  prioritized.sort((a, b) => b.score - a.score);
+
+  const bench: LineupPlayer[] = [];
+  const used = new Set(usedIds);
+
+  for (const { player } of prioritized) {
+    if (bench.length >= 7) break;
+    if (used.has(player.id)) continue;
+    used.add(player.id);
+
+    const position = player.positions[0] ?? "CM";
+    const role = selectBestRoleForPlayer(player, "4-3-3", position);
+    const roleDef = getRoleDefinition(role);
+    bench.push(toLineupPlayer(player, roleDef, position));
+  }
+
+  return bench;
+}
+
 export function buildLineup(
   clubId: string,
   formation: Formation,
   customPlayerSelections?: Player[],
-): { goalkeeper: LineupPlayer; outfield: LineupPlayer[] } {
+): { goalkeeper: LineupPlayer; outfield: LineupPlayer[]; bench: LineupPlayer[] } {
   const players = customPlayerSelections ?? getPlayersByClub(clubId);
   const positions = getFormationPositions(formation);
   const usedIds = new Set<string>();
@@ -187,25 +225,14 @@ export function buildLineup(
     if (!player) continue;
     usedIds.add(player.id);
 
-    const possibleRoles = getDefaultRoles(formation, pos);
-    const { role } = findBestRoleForPlayer(player.positions, player.roleSuitability);
-
-    let chosenRole: Role = possibleRoles[0] ?? "Central Midfielder";
-    for (const r of possibleRoles) {
-      if (player.roleSuitability[r] !== undefined) {
-        const suit = player.roleSuitability[r]!;
-        const currentSuit = player.roleSuitability[chosenRole] ?? 0;
-        if (suit > currentSuit) {
-          chosenRole = r;
-        }
-      }
-    }
-
+    const chosenRole = selectBestRoleForPlayer(player, formation, pos);
     const roleDef = getRoleDefinition(chosenRole);
-    outfield.push({ player, role: roleDef, position: pos });
+    outfield.push(toLineupPlayer(player, roleDef, pos));
   }
 
-  return { goalkeeper: gkLineup, outfield };
+  const bench = buildBench(outfield, players, usedIds);
+
+  return { goalkeeper: gkLineup, outfield, bench };
 }
 
 export function buildDefaultTactic(formation: Formation, mentality: Mentality = "balanced"): Tactic {
@@ -260,13 +287,12 @@ export function simulateFootballMatch(
     isDerby: false,
   };
 
-  const homeSetup: TeamSetup = {
-    club: homeClub,
-    manager: homeManager ?? {
-      id: "default-home",
-      name: `${homeClub.name} Manager`,
+  function buildDefaultManager(name: string, formation: Formation): Manager {
+    return {
+      id: "default",
+      name,
       age: 50,
-      nationality: homeClub.nation,
+      nationality: "Unknown",
       tacticalDiscipline: 70,
       adaptability: 70,
       motivation: 70,
@@ -277,35 +303,26 @@ export function simulateFootballMatch(
       inGameManagement: 65,
       youthDevelopment: 60,
       squadSquadRotation: 50,
-      preferredFormations: [homeFormation],
-    },
+      preferredFormations: [formation],
+    };
+  }
+
+  const homeSetup: TeamSetup = {
+    club: homeClub,
+    manager: homeManager ?? buildDefaultManager(`${homeClub.name} Manager`, homeFormation),
     tactic: homeTactic,
     outfield: homeLineup.outfield,
     goalkeeper: homeLineup.goalkeeper,
+    bench: homeLineup.bench,
   };
 
   const awaySetup: TeamSetup = {
     club: awayClub,
-    manager: awayManager ?? {
-      id: "default-away",
-      name: `${awayClub.name} Manager`,
-      age: 50,
-      nationality: awayClub.nation,
-      tacticalDiscipline: 70,
-      adaptability: 70,
-      motivation: 70,
-      manManagement: 70,
-      attackingBias: 55,
-      defensiveBias: 50,
-      rotation: 50,
-      inGameManagement: 65,
-      youthDevelopment: 60,
-      squadSquadRotation: 50,
-      preferredFormations: [awayFormation],
-    },
+    manager: awayManager ?? buildDefaultManager(`${awayClub.name} Manager`, awayFormation),
     tactic: awayTactic,
     outfield: awayLineup.outfield,
     goalkeeper: awayLineup.goalkeeper,
+    bench: awayLineup.bench,
   };
 
   const result = simulateMatch(homeSetup, awaySetup, context);
@@ -348,6 +365,14 @@ function formatMatchResult(result: MatchResult): void {
   const saves = result.events.filter(e => e.phase === "shot").slice(0, 5);
   for (const s of saves) {
     console.log(`  ${s.description}`);
+  }
+
+  const subs = result.events.filter(e => e.phase === "substitution");
+  if (subs.length > 0) {
+    console.log(`\n  Substitutions:`);
+    for (const s of subs) {
+      console.log(`  ${s.description}`);
+    }
   }
 
   console.log(`\n  Man of the Match: ${result.manOfMatch}`);

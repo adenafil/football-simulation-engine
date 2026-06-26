@@ -26,6 +26,7 @@ function runSimulation() {
     tactic: homeTactic,
     outfield: homeLineup.outfield,
     goalkeeper: homeLineup.goalkeeper,
+    bench: homeLineup.bench,
   };
 
   const awaySetup = {
@@ -34,6 +35,7 @@ function runSimulation() {
     tactic: awayTactic,
     outfield: awayLineup.outfield,
     goalkeeper: awayLineup.goalkeeper,
+    bench: awayLineup.bench,
   };
 
   return simulateMatch(homeSetup, awaySetup, context);
@@ -81,8 +83,32 @@ test("xG trend: Real Madrid should have higher avg xG than Man Utd", () => {
   expect(avgHomeXg).toBeGreaterThan(0.5);
 });
 
-test("lineup building produces 11 players", () => {
+test("lineup building produces 11 players + bench", () => {
   const lineup = buildLineup("real-madrid", "4-3-3");
   expect(lineup.outfield.length).toBe(10);
   expect(lineup.goalkeeper).toBeDefined();
+  expect(lineup.bench.length).toBeGreaterThanOrEqual(1);
+});
+
+test("simulation produces substitution events", () => {
+  const results = Array.from({ length: 5 }, () => runSimulation());
+  const hasSubs = results.some(r => r.substitutions.length > 0);
+  expect(hasSubs).toBe(true);
+});
+
+test("substitutions never exceed 5 per team", () => {
+  for (let i = 0; i < 10; i++) {
+    const result = runSimulation();
+    expect(result.substitutions.filter(s => s.team === "home").length).toBeLessThanOrEqual(5);
+    expect(result.substitutions.filter(s => s.team === "away").length).toBeLessThanOrEqual(5);
+  }
+});
+
+test("bench player who entered has minutesPlayed > 0", () => {
+  for (let i = 0; i < 5; i++) {
+    const result = runSimulation();
+    for (const pr of result.playerRatings) {
+      expect(pr.minutesPlayed).toBeGreaterThanOrEqual(1);
+    }
+  }
 });

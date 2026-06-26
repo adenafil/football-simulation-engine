@@ -15,10 +15,20 @@ export interface MatchContext {
   isDerby: boolean;
 }
 
+export interface SubstitutionEvent {
+  minute: number;
+  team: "home" | "away";
+  playerOutId: string;
+  playerOutName: string;
+  playerInId: string;
+  playerInName: string;
+  reason: "fatigue" | "chasing-goal" | "protect-lead";
+}
+
 export interface PossessionEvent {
   minute: number;
   team: "home" | "away";
-  phase: "buildUp" | "progression" | "finalThird" | "shot" | "goal";
+  phase: "buildUp" | "progression" | "finalThird" | "shot" | "goal" | "substitution";
   description: string;
 }
 
@@ -62,4 +72,5 @@ export interface MatchResult {
   manOfMatch: string;
   homeFormation: string;
   awayFormation: string;
+  substitutions: SubstitutionEvent[];
 }
