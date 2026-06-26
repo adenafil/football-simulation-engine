@@ -2,6 +2,7 @@ export type { Club, ClubFacilities, ClubFinances, ClubStatus } from "./domain/cl
 export type { Manager } from "./domain/manager";
 export type {
   CompetitionType,
+  InjuryEvent,
   MatchContext,
   MatchImportance,
   MatchResult,
@@ -37,7 +38,7 @@ export type {
   Width,
 } from "./domain/tactic";
 export { simulateMatch, type LineupPlayer, type TeamSetup } from "./engine/match-simulator";
-export { buildDefaultTactic, buildLineup, type BuiltLineup } from "./engine/lineup-builder";
+export { buildDefaultTactic, buildLineup, type BuildLineupConfig, type BuiltLineup } from "./engine/lineup-builder";
 export {
   computeGoalkeeperPhaseScores,
   computePlayerPhaseScores,

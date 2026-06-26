@@ -3,6 +3,7 @@ import type { Club } from "../domain/club";
 import type { Manager } from "../domain/manager";
 import type { Tactic } from "../domain/tactic";
 import type {
+  InjuryEvent,
   MatchContext,
   MatchResult,
   MatchStats,
@@ -29,6 +30,7 @@ import {
   clampOverlay,
   getEffectivePhaseScores,
 } from "./match-state";
+import { incrementStat, selectPossessionParticipants } from "./player-involvement";
 
 export interface LineupPlayer {
   player: Player;
@@ -50,6 +52,7 @@ interface ActivePlayerState {
   currentCondition: number;
   minutesOnPitch: number;
   entryMinute: number;
+  injuryLevel: 0 | 1 | 2;
 }
 
 interface BenchState {
@@ -73,19 +76,8 @@ interface PlayerMatchAccumulator extends PlayerMatchStats {
   player: Player;
 }
 
-interface PossessionSelectionContext {
-  attackingState: TeamMatchState;
-  defendingState: TeamMatchState;
-  minute: number;
-  attackingTeam: "home" | "away";
-}
-
 function randomInt(min: number, max: number): number {
   return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
-function clamp(value: number, min = 0, max = 1): number {
-  return Math.max(min, Math.min(max, value));
 }
 
 function createTeamMatchState(team: TeamSetup): TeamMatchState {
@@ -94,6 +86,7 @@ function createTeamMatchState(team: TeamSetup): TeamMatchState {
     currentCondition: 95,
     minutesOnPitch: 0,
     entryMinute: 0,
+    injuryLevel: 0,
   }));
 
   const benchPlayers: BenchState[] = team.bench.map(lp => ({
@@ -197,169 +190,9 @@ function initializePlayerStats(home: TeamSetup, away: TeamSetup): Map<string, Pl
   return stats;
 }
 
-function getPlayerStateById(state: TeamMatchState, playerId: string | undefined): ActivePlayerState | null {
-  if (!playerId) return null;
-  return state.activeOutfield.find(playerState => playerState.lineup.player.id === playerId) ?? null;
-}
-
-function getPositionBias(position: string, allowed: string[]): number {
-  if (allowed.includes(position)) return 1.25;
-  if (position.startsWith("AM") && allowed.includes("AML")) return 1.1;
-  return 1;
-}
-
-function getConditionFactor(condition: number): number {
-  return clamp(condition / 100, 0.55, 1.05);
-}
-
-function weightedPick<T>(items: T[], scorer: (item: T) => number): T | null {
-  if (items.length === 0) return null;
-
-  const scored = items.map(item => ({ item, score: Math.max(0.01, scorer(item)) }));
-  const total = scored.reduce((sum, entry) => sum + entry.score, 0);
-  let roll = Math.random() * total;
-
-  for (const entry of scored) {
-    roll -= entry.score;
-    if (roll <= 0) return entry.item;
-  }
-
-  return scored[scored.length - 1]?.item ?? null;
-}
-
-function pickFromActivePlayers(
-  state: TeamMatchState,
-  positions: string[],
-  selector: (playerState: ActivePlayerState) => number,
-  excludedIds: string[] = [],
-): ActivePlayerState | null {
-  const excluded = new Set(excludedIds);
-  const candidates = state.activeOutfield.filter(playerState => !excluded.has(playerState.lineup.player.id));
-  const picked = weightedPick(candidates, playerState => {
-    const player = playerState.lineup.player;
-    const tech = player.attributes.technical;
-    const mental = player.attributes.mental;
-    const physical = player.attributes.physical;
-    const roleSuitability = player.roleSuitability[playerState.lineup.role.name] ?? 60;
-    const positionBias = getPositionBias(playerState.lineup.position, positions);
-    const roleBias = 0.8 + (
-      playerState.lineup.role.phaseWeights.buildUp +
-      playerState.lineup.role.phaseWeights.progression +
-      playerState.lineup.role.phaseWeights.finalThird +
-      playerState.lineup.role.phaseWeights.finishing
-    ) * 0.2;
-
-    return selector(playerState)
-      * (roleSuitability / 100)
-      * positionBias
-      * roleBias
-      * getConditionFactor(playerState.currentCondition)
-      * (1 + (tech.technique + mental.decisions + physical.stamina) / 600);
-  });
-
-  return picked;
-}
-
-function pickBuildUpActor(state: TeamMatchState): ActivePlayerState | null {
-  return pickFromActivePlayers(state, ["CB", "DM", "LB", "RB", "CM"], playerState => {
-    const player = playerState.lineup.player;
-    return player.attributes.technical.passing * 0.3
-      + player.attributes.technical.firstTouch * 0.2
-      + player.attributes.mental.composure * 0.2
-      + player.attributes.mental.decisions * 0.15
-      + player.attributes.technical.technique * 0.15;
-  });
-}
-
-function pickProgressionActor(state: TeamMatchState, buildUpActorId?: string): ActivePlayerState | null {
-  return pickFromActivePlayers(state, ["CM", "LM", "RM", "AML", "AMR", "LWB", "RWB", "AMC"], playerState => {
-    const player = playerState.lineup.player;
-    return player.attributes.technical.dribbling * 0.22
-      + player.attributes.technical.passing * 0.2
-      + player.attributes.mental.vision * 0.16
-      + player.attributes.technical.technique * 0.16
-      + player.attributes.physical.pace * 0.14
-      + player.attributes.mental.workRate * 0.12;
-  }, buildUpActorId ? [buildUpActorId] : []);
-}
-
-function pickCreator(state: TeamMatchState, progressionActorId?: string): ActivePlayerState | null {
-  return pickFromActivePlayers(state, ["AMC", "AML", "AMR", "LM", "RM", "ST", "CM"], playerState => {
-    const player = playerState.lineup.player;
-    return player.attributes.mental.vision * 0.22
-      + player.attributes.mental.flair * 0.16
-      + player.attributes.technical.passing * 0.22
-      + player.attributes.technical.dribbling * 0.14
-      + player.attributes.technical.crossing * 0.1
-      + player.attributes.mental.decisions * 0.08
-      + player.attributes.mental.offTheBall * 0.08;
-  }, progressionActorId ? [progressionActorId] : []);
-}
-
-function pickShooter(state: TeamMatchState, creatorId?: string): ActivePlayerState | null {
-  return pickFromActivePlayers(state, ["ST", "CF", "AML", "AMR", "AMC"], playerState => {
-    const player = playerState.lineup.player;
-    return player.attributes.technical.finishing * 0.3
-      + player.attributes.mental.composure * 0.2
-      + player.attributes.mental.offTheBall * 0.18
-      + player.attributes.mental.anticipation * 0.14
-      + player.attributes.technical.technique * 0.1
-      + player.attributes.technical.longShots * 0.08;
-  }, creatorId ? [creatorId] : []);
-}
-
-function pickDefender(state: TeamMatchState): ActivePlayerState | null {
-  return pickFromActivePlayers(state, ["CB", "DM", "LB", "RB"], playerState => {
-    const player = playerState.lineup.player;
-    return player.attributes.technical.tackling * 0.24
-      + player.attributes.technical.marking * 0.2
-      + player.attributes.mental.positioning * 0.18
-      + player.attributes.mental.concentration * 0.12
-      + player.attributes.mental.aggression * 0.08
-      + player.attributes.mental.bravery * 0.08
-      + player.attributes.physical.strength * 0.1;
-  });
-}
-
-function selectPossessionParticipants(context: PossessionSelectionContext): PossessionParticipants {
-  const buildUpActor = pickBuildUpActor(context.attackingState);
-  const progressionActor = pickProgressionActor(context.attackingState, buildUpActor?.lineup.player.id);
-  const creator = pickCreator(context.attackingState, progressionActor?.lineup.player.id ?? buildUpActor?.lineup.player.id);
-  const shooter = pickShooter(context.attackingState, creator?.lineup.player.id);
-  const defender = pickDefender(context.defendingState);
-  const assisterId = creator && shooter && creator.lineup.player.id !== shooter.lineup.player.id
-    ? creator.lineup.player.id
-    : progressionActor?.lineup.player.id;
-
-  return {
-    buildUpPlayerId: buildUpActor?.lineup.player.id,
-    progressionPlayerId: progressionActor?.lineup.player.id,
-    creatorPlayerId: creator?.lineup.player.id,
-    shooterPlayerId: shooter?.lineup.player.id ?? creator?.lineup.player.id ?? buildUpActor?.lineup.player.id,
-    assisterPlayerId: assisterId,
-    defenderPlayerId: defender?.lineup.player.id,
-  };
-}
-
-function incrementStat(
-  playerStats: Map<string, PlayerMatchAccumulator>,
-  playerId: string | undefined,
-  key: keyof PlayerMatchStats,
-  amount: number = 1,
-): void {
-  if (!playerId) return;
-  const stats = playerStats.get(playerId);
-  if (!stats) return;
-  const currentValue = stats[key];
-  if (typeof currentValue === "number") {
-    (stats[key] as number) = currentValue + amount;
-  }
-}
-
 function recordPossessionStats(
   playerStats: Map<string, PlayerMatchAccumulator>,
   participants: PossessionParticipants,
-  attackingTeam: "home" | "away",
   outcome: ReturnType<typeof simulatePossession>,
 ): void {
   if (["progression", "finalThird", "shot", "goal"].includes(outcome.attackingPhase)) {
@@ -407,6 +240,23 @@ function recordPossessionStats(
   }
 }
 
+function applyRedCardImpact(
+  state: TeamMatchState,
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  playerId: string | undefined,
+  minute: number,
+): void {
+  if (!playerId) return;
+  const playerIndex = state.activeOutfield.findIndex(playerState => playerState.lineup.player.id === playerId);
+  if (playerIndex === -1) return;
+
+  const [dismissedPlayer] = state.activeOutfield.splice(playerIndex, 1);
+  if (!dismissedPlayer) return;
+
+  recordSubstitutedPlayerMinutes(playerStats, dismissedPlayer, minute);
+  recomputeTeamPhase(state);
+}
+
 function updateMinutesPlayed(
   playerStats: Map<string, PlayerMatchAccumulator>,
   state: TeamMatchState,
@@ -440,6 +290,74 @@ function recordSubstitutedPlayerMinutes(
   const stats = playerStats.get(playerOut.lineup.player.id);
   if (!stats) return;
   stats.minutesPlayed = Math.max(stats.minutesPlayed, Math.max(1, minute - playerOut.entryMinute));
+}
+
+function getInjuryChance(playerState: ActivePlayerState, minute: number): number {
+  const player = playerState.lineup.player;
+  const fatigueLoad = Math.max(0, (95 - playerState.currentCondition) / 100);
+  const minuteLoad = Math.max(0, (minute - 35) / 90);
+  const proneness = player.injuryProneness / 100;
+  const staminaRisk = Math.max(0, (70 - player.attributes.physical.stamina) / 200);
+  return Math.min(0.018, 0.0008 + fatigueLoad * 0.01 + minuteLoad * 0.003 + proneness * 0.003 + staminaRisk * 0.002);
+}
+
+function pickInjuredPlayer(state: TeamMatchState, minute: number): ActivePlayerState | null {
+  const candidates = state.activeOutfield.filter(playerState => playerState.injuryLevel < 2);
+  for (const playerState of candidates) {
+    if (Math.random() < getInjuryChance(playerState, minute)) {
+      return playerState;
+    }
+  }
+  return null;
+}
+
+function resolveInjurySeverity(playerState: ActivePlayerState): "minor" | "moderate" | "severe" {
+  const roll = Math.random();
+  const pronenessBias = playerState.lineup.player.injuryProneness / 500;
+  if (roll + pronenessBias > 0.9) return "severe";
+  if (roll + pronenessBias > 0.55) return "moderate";
+  return "minor";
+}
+
+function applyInjuryConditionPenalty(playerState: ActivePlayerState, severity: "minor" | "moderate" | "severe"): void {
+  if (severity === "minor") {
+    playerState.currentCondition = Math.max(55, playerState.currentCondition - 12);
+    playerState.injuryLevel = 1;
+    return;
+  }
+
+  if (severity === "moderate") {
+    playerState.currentCondition = Math.max(45, playerState.currentCondition - 24);
+    playerState.injuryLevel = 2;
+    return;
+  }
+
+  playerState.currentCondition = Math.max(40, playerState.currentCondition - 32);
+  playerState.injuryLevel = 2;
+}
+
+function applyForcedInjurySubstitution(
+  state: TeamMatchState,
+  playerStats: Map<string, PlayerMatchAccumulator>,
+  playerOut: ActivePlayerState,
+  minute: number,
+  scoreDiff: number,
+  team: "home" | "away",
+): { subEvent: SubstitutionEvent; replacementName: string; replacementId: string } | null {
+  if (state.substitutionsUsed >= 5) return null;
+
+  const replacement = pickBenchReplacement(state, playerOut, scoreDiff);
+  if (!replacement) return null;
+
+  recordSubstitutedPlayerMinutes(playerStats, playerOut, minute);
+  const subEvent = applySubstitution(state, playerOut, replacement, minute, scoreDiff);
+  subEvent.team = team;
+
+  return {
+    subEvent,
+    replacementName: replacement.lineup.player.name,
+    replacementId: replacement.lineup.player.id,
+  };
 }
 
 const HIGH_FATIGUE_ROLES = new Set([
@@ -575,6 +493,7 @@ function applySubstitution(
     currentCondition: 95,
     minutesOnPitch: 0,
     entryMinute: minute,
+    injuryLevel: 0,
   };
 
   const idx = state.activeOutfield.indexOf(playerOut);
@@ -632,6 +551,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
 
   const events: PossessionEvent[] = [];
   const allSubstitutions: SubstitutionEvent[] = [];
+  const allInjuries: InjuryEvent[] = [];
 
   let homePosCount = 0;
   let awayPosCount = 0;
@@ -673,8 +593,6 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     const participants = selectPossessionParticipants({
       attackingState: isHomeAttacking ? homeState : awayState,
       defendingState: isHomeAttacking ? awayState : homeState,
-      minute,
-      attackingTeam: isHomeAttacking ? "home" : "away",
     });
 
     const outcome = simulatePossession({
@@ -687,7 +605,7 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
       awayStamina: avgAwayCondition,
     });
 
-    recordPossessionStats(playerStats, participants, isHomeAttacking ? "home" : "away", outcome);
+    recordPossessionStats(playerStats, participants, outcome);
 
     if (outcome.shot) {
       if (isHomeAttacking) stats.shots.home++;
@@ -749,6 +667,19 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     if (outcome.redCard) {
       if (isHomeAttacking) stats.redCards.home++;
       else stats.redCards.away++;
+
+      applyRedCardImpact(
+        isHomeAttacking ? homeState : awayState,
+        playerStats,
+        participants.shooterPlayerId,
+        minute,
+      );
+      applyRedCardImpact(
+        isHomeAttacking ? awayState : homeState,
+        playerStats,
+        participants.defenderPlayerId,
+        minute,
+      );
     }
 
     if (outcome.offside) {
@@ -766,6 +697,66 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
 
     updateGoalkeeperCondition(home.goalkeeper, minute);
     updateGoalkeeperCondition(away.goalkeeper, minute);
+
+    for (const injuryCase of [
+      { state: homeState, team: "home" as const, scoreDiff: homeScore - awayScore },
+      { state: awayState, team: "away" as const, scoreDiff: awayScore - homeScore },
+    ]) {
+      const injuredPlayer = pickInjuredPlayer(injuryCase.state, minute);
+      if (!injuredPlayer) continue;
+
+      const severity = resolveInjurySeverity(injuredPlayer);
+      applyInjuryConditionPenalty(injuredPlayer, severity);
+
+      let forcedSubstitution = false;
+      let replacementPlayerId: string | undefined;
+      let replacementPlayerName: string | undefined;
+
+      if (severity !== "minor") {
+        const forcedSub = applyForcedInjurySubstitution(
+          injuryCase.state,
+          playerStats,
+          injuredPlayer,
+          minute,
+          injuryCase.scoreDiff,
+          injuryCase.team,
+        );
+
+        if (forcedSub) {
+          forcedSubstitution = true;
+          replacementPlayerId = forcedSub.replacementId;
+          replacementPlayerName = forcedSub.replacementName;
+          allSubstitutions.push(forcedSub.subEvent);
+          events.push({
+            minute,
+            team: injuryCase.team,
+            phase: "substitution",
+            description: `${minute}' Forced substitution: ${forcedSub.subEvent.playerOutName} off injured, ${forcedSub.subEvent.playerInName} on`,
+          });
+        }
+      }
+
+      const injuryEvent: InjuryEvent = {
+        minute,
+        team: injuryCase.team,
+        playerId: injuredPlayer.lineup.player.id,
+        playerName: injuredPlayer.lineup.player.name,
+        severity,
+        forcedSubstitution,
+        replacementPlayerId,
+        replacementPlayerName,
+      };
+
+      allInjuries.push(injuryEvent);
+      events.push({
+        minute,
+        team: injuryCase.team,
+        phase: "injury",
+        description: forcedSubstitution
+          ? `${minute}' Injury: ${injuredPlayer.lineup.player.name} goes off (${severity})`
+          : `${minute}' Injury concern: ${injuredPlayer.lineup.player.name} continues (${severity})`,
+      });
+    }
 
     if (subCheckMinutes.includes(minute)) {
       const homeScoreDiff = homeScore - awayScore;
@@ -860,5 +851,6 @@ export function simulateMatch(home: TeamSetup, away: TeamSetup, context: MatchCo
     homeFormation: home.tactic.formation,
     awayFormation: away.tactic.formation,
     substitutions: allSubstitutions,
+    injuries: allInjuries,
   };
 }

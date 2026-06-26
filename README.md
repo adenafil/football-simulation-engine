@@ -129,10 +129,24 @@ console.log(result.playerMatchStats);
 
 ## Public API Notes
 
-- `buildLineup(players, formation)` is intentionally opinionated for now
+- `buildLineup(players, formation, config?)` is intentionally opinionated for now
 - the API is designed so config options can be added later without changing the main usage model
 - `simulateMatch(...)` is the core engine entry point
 - `MatchResult.playerMatchStats` contains accumulated per-player match contributions
+
+Current `buildLineup` config supports:
+
+- `benchSize`
+- `excludePlayerIds`
+- `lockedPlayerIds`
+
+Red cards now have structural impact during simulation: the dismissed side loses an active outfield player and their team phase scores are recalculated.
+
+Injuries are also modeled during matches:
+
+- low probability, fatigue-aware injury checks
+- moderate and severe injuries try to trigger forced substitutions
+- if no bench option or sub slot remains, the player can continue at heavily reduced condition
 
 ## Internal Fixtures
 

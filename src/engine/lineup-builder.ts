@@ -185,10 +185,18 @@ export interface BuiltLineup {
   bench: LineupPlayer[];
 }
 
-export function buildLineup(players: Player[], formation: Formation): BuiltLineup {
+export interface BuildLineupConfig {
+  benchSize?: number;
+  excludePlayerIds?: string[];
+  lockedPlayerIds?: string[];
+}
+
+export function buildLineup(players: Player[], formation: Formation, config: BuildLineupConfig = {}): BuiltLineup {
   const positions = getFormationPositions(formation);
+  const excludedIds = new Set(config.excludePlayerIds ?? []);
+  const availablePlayers = players.filter(player => !excludedIds.has(player.id));
   const usedIds = new Set<string>();
-  const goalkeeper = selectBestPlayerForPosition(players, "GK", usedIds);
+  const goalkeeper = selectBestPlayerForPosition(availablePlayers, "GK", usedIds);
 
   if (!goalkeeper) {
     throw new Error("No goalkeeper found for lineup build");
@@ -203,9 +211,11 @@ export function buildLineup(players: Player[], formation: Formation): BuiltLineu
   };
 
   const outfield: LineupPlayer[] = [];
+  const lockedPlayers = new Set(config.lockedPlayerIds ?? []);
   for (const position of positions) {
     if (position === "GK") continue;
-    const player = selectBestPlayerForPosition(players, position, usedIds);
+    const lockedCandidate = availablePlayers.find(player => !usedIds.has(player.id) && lockedPlayers.has(player.id) && player.positions.includes(position as Position));
+    const player = lockedCandidate ?? selectBestPlayerForPosition(availablePlayers, position, usedIds);
     if (!player) continue;
 
     usedIds.add(player.id);
@@ -216,7 +226,7 @@ export function buildLineup(players: Player[], formation: Formation): BuiltLineu
   return {
     goalkeeper: lineupGoalkeeper,
     outfield,
-    bench: buildBench(players, usedIds),
+    bench: buildBench(availablePlayers, usedIds).slice(0, config.benchSize ?? 7),
   };
 }
 

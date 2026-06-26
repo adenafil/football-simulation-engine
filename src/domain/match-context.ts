@@ -25,6 +25,17 @@ export interface SubstitutionEvent {
   reason: "fatigue" | "chasing-goal" | "protect-lead";
 }
 
+export interface InjuryEvent {
+  minute: number;
+  team: "home" | "away";
+  playerId: string;
+  playerName: string;
+  severity: "minor" | "moderate" | "severe";
+  forcedSubstitution: boolean;
+  replacementPlayerId?: string;
+  replacementPlayerName?: string;
+}
+
 export interface PossessionParticipants {
   buildUpPlayerId?: string;
   progressionPlayerId?: string;
@@ -37,7 +48,7 @@ export interface PossessionParticipants {
 export interface PossessionEvent {
   minute: number;
   team: "home" | "away";
-  phase: "buildUp" | "progression" | "finalThird" | "shot" | "goal" | "substitution";
+  phase: "buildUp" | "progression" | "finalThird" | "shot" | "goal" | "substitution" | "injury";
   description: string;
   participants?: PossessionParticipants;
 }
@@ -102,4 +113,5 @@ export interface MatchResult {
   homeFormation: string;
   awayFormation: string;
   substitutions: SubstitutionEvent[];
+  injuries: InjuryEvent[];
 }

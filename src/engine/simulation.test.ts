@@ -91,6 +91,17 @@ test("lineup building produces 11 players + bench", () => {
   expect(lineup.bench.length).toBeGreaterThanOrEqual(1);
 });
 
+test("lineup building accepts config for bench size and exclusions", () => {
+  const players = getPlayersByClub("real-madrid");
+  const lineup = buildLineup(players, "4-3-3", {
+    benchSize: 5,
+    excludePlayerIds: ["mbappe"],
+  });
+
+  expect(lineup.bench.length).toBeLessThanOrEqual(5);
+  expect(lineup.outfield.some(player => player.player.id === "mbappe")).toBe(false);
+});
+
 test("player match stats align with match goal totals", () => {
   const result = runSimulation();
   const totalGoals = result.playerMatchStats.reduce((sum, player) => sum + player.goals, 0);
@@ -149,5 +160,29 @@ test("match state: trailing teams have correlated late shots (integration smoke)
   }
   if (trailingLateMinutes > 0) {
     expect(trailingLateShots).toBeGreaterThan(0);
+  }
+});
+
+test("injury events stay consistent with substitutions when forced", () => {
+  const results = Array.from({ length: 10 }, () => runSimulation());
+  for (const result of results) {
+    for (const injury of result.injuries) {
+      if (!injury.forcedSubstitution) continue;
+      const matchingSub = result.substitutions.find(sub =>
+        sub.team === injury.team
+        && sub.playerOutId === injury.playerId
+        && sub.playerInId === injury.replacementPlayerId,
+      );
+      expect(matchingSub).toBeDefined();
+    }
+  }
+});
+
+test("injury events are additive and well-formed", () => {
+  const result = runSimulation();
+  for (const injury of result.injuries) {
+    expect(["minor", "moderate", "severe"]).toContain(injury.severity);
+    expect(injury.playerId.length).toBeGreaterThan(0);
+    expect(injury.playerName.length).toBeGreaterThan(0);
   }
 });
